@@ -35,7 +35,7 @@ Noisy CI latency gate:
 CRADLE_SKIP_LATENCY=1 uv run pytest
 ```
 
-Default config: `config/cradle.yaml`. Override upstream with `CRADLE_UPSTREAM_BASE_URL`. Proxy listen is `127.0.0.1:8000`. One `CRADLE_API_KEY` maps to one `user_id`.
+Default config: `config/cradle.yaml`. Override upstream with `CRADLE_UPSTREAM_BASE_URL`. Proxy listen is `127.0.0.1:8000`. Default is intercept mode: no Cradle API key; client `Authorization` is forwarded and used as the cache tenant. Optional `auth.keys` is an allowlist.
 
 L2 (Qdrant local) requires a **single** uvicorn worker. `WEB_CONCURRENCY` / `UVICORN_WORKERS` other than `1` is a startup error. Bypass streams (`stream+tools`, `n!=1`, logprobs) are raw SSE passthrough; cacheable stream misses still wrap text completions.
 

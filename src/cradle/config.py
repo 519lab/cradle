@@ -68,7 +68,7 @@ class UpstreamSettings(BaseModel):
     base_url: str = "http://127.0.0.1:8080/v1"
     api_key_env: str = "CRADLE_UPSTREAM_API_KEY"
     timeout_s: float = 120
-    pass_through_client_auth: bool = False
+    pass_through_client_auth: bool = True
     models_passthrough: bool = False
     models: list[str] = Field(default_factory=lambda: ["gpt-4o-mini"])
 

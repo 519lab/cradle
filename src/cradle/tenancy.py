@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import os
@@ -12,6 +13,8 @@ from cradle.config import Settings
 from cradle.gateway.errors import openai_error
 
 log = logging.getLogger("cradle.tenancy")
+
+ANON = Principal(tenant_id="anon", user_id="anon", key_id="anon")
 
 
 def load_principals(settings: Settings) -> list[tuple[str, Principal]]:
@@ -30,17 +33,26 @@ def load_principals(settings: Settings) -> list[tuple[str, Principal]]:
 
 
 def assert_auth_ready(settings: Settings, principals: list[tuple[str, Principal]]) -> None:
-    if principals:
-        return
-    bind = settings.server.host
-    loopback = bind in {"127.0.0.1", "::1", "localhost"}
-    if settings.auth.allow_insecure_loopback and loopback:
-        log.warning("no API keys configured; insecure loopback auth allowed")
-        return
-    raise RuntimeError(
-        "no proxy API keys resolved from auth.keys token_env; "
-        "set CRADLE_API_KEY or enable auth.allow_insecure_loopback on loopback"
-    )
+    if settings.auth.keys and not principals:
+        raise RuntimeError(
+            "auth.keys is set but no token_env values resolved; "
+            "unset auth.keys for intercept mode (forward client credentials) "
+            "or export the listed env vars"
+        )
+
+
+def bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization") or ""
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return ""
+
+
+def principal_from_forwarded_token(token: str) -> Principal:
+    if not token:
+        return ANON
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return Principal(tenant_id=digest, user_id=digest, key_id="forwarded")
 
 
 def _same_length_compare(supplied: str, secret: str) -> bool:
@@ -53,17 +65,11 @@ def _same_length_compare(supplied: str, secret: str) -> bool:
 async def authenticate(
     request: Request, settings: Settings, principals: list[tuple[str, Principal]]
 ) -> Principal | JSONResponse:
-    header = request.headers.get("authorization") or ""
-    supplied = ""
-    if header.lower().startswith("bearer "):
-        supplied = header[7:].strip()
+    supplied = bearer_token(request)
+    if not principals:
+        return principal_from_forwarded_token(supplied)
     found: Principal | None = None
     dummy = "0" * 32
-    if not principals:
-        hmac.compare_digest(dummy.encode(), dummy.encode())
-        if settings.auth.allow_insecure_loopback:
-            return Principal(tenant_id="default", user_id="default", key_id="insecure")
-        return _unauth()
     for secret, principal in principals:
         candidate = supplied if supplied else dummy
         if supplied and _same_length_compare(candidate, secret):
@@ -71,9 +77,5 @@ async def authenticate(
         else:
             _same_length_compare(secret, secret)
     if found is None:
-        return _unauth()
+        return openai_error("invalid api key", "invalid_request_error", "invalid_api_key", 401)
     return found
-
-
-def _unauth():
-    return openai_error("invalid api key", "invalid_request_error", "invalid_api_key", 401)

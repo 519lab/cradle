@@ -16,6 +16,8 @@ def test_yaml_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.upstream.base_url.endswith(":8080/v1")
     assert s.features.structure is False
     assert s.pipeline_version == "v1"
+    assert s.auth.keys == []
+    assert s.upstream.pass_through_client_auth is True
 
 
 def test_env_overrides_yaml(monkeypatch: pytest.MonkeyPatch) -> None:

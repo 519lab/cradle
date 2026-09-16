@@ -12,10 +12,10 @@ No Redis. No Qdrant server process. No Ollama.
 
 ## Quick start
 
-Point the OpenAI SDK (or any compatible client) at Cradle’s base URL instead of the provider. Cradle forwards to `upstream.base_url`.
+Point the OpenAI SDK (or any compatible client) at Cradle’s base URL instead of the provider. Keep the same `Authorization` header; Cradle forwards it upstream. No Cradle-issued API key.
 
 ```bash
-cp .env.example .env   # CRADLE_API_KEY, CRADLE_UPSTREAM_API_KEY
+cp .env.example .env   # CRADLE_UPSTREAM_BASE_URL if the provider is not on localhost:8080
 uv sync --group dev
 uv run python -m cradle
 ```
@@ -25,7 +25,7 @@ Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0
 ## Docker
 
 ```bash
-cp .env.example .env   # CRADLE_API_KEY (required at runtime)
+cp .env.example .env   # optional CRADLE_UPSTREAM_BASE_URL
 docker compose up --build
 ```
 
@@ -35,12 +35,12 @@ The image does **not** declare `VOLUME /data`. CI uses `compose.ci.yml` with tmp
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Authorization: Bearer $CRADLE_API_KEY" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-One gateway key ⇒ one `user_id`. Add more keys in `config/cradle.yaml` `auth.keys`. The client never sees the upstream key.
+Drop-in: change the client `base_url` to Cradle (or bind Cradle on the port your clients already use) and set `CRADLE_UPSTREAM_BASE_URL` to the real provider. Cache entries are isolated by SHA-256 of the presented Bearer token. Optional `auth.keys` in YAML is an allowlist if you want Cradle-issued keys instead.
 
 ## Ops notes
 

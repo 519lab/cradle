@@ -10,7 +10,6 @@ services:
       CRADLE_SERVER__HOST: "0.0.0.0"
       CRADLE_DATA_DIR: /data
       CRADLE_CONFIG: /app/config/cradle.yaml
-      CRADLE_API_KEY: ci-test-key
       CRADLE_FEATURES__L2: "false"
       CRADLE_UPSTREAM_BASE_URL: http://127.0.0.1:9
     tmpfs:

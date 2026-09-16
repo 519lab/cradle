@@ -18,7 +18,6 @@ services:
       CRADLE_DATA_DIR: /data
       CRADLE_CONFIG: /app/config/cradle.yaml
       FASTEMBED_CACHE_PATH: /opt/cradle/models/fastembed
-      CRADLE_API_KEY: ${CRADLE_API_KEY:-}
       CRADLE_UPSTREAM_API_KEY: ${CRADLE_UPSTREAM_API_KEY:-}
       CRADLE_UPSTREAM_BASE_URL: ${CRADLE_UPSTREAM_BASE_URL:-http://host.docker.internal:8080/v1}
     volumes:
