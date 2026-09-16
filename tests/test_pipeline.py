@@ -10,6 +10,7 @@ def test_l1_hit_after_miss(client: TestClient, auth_header: dict[str, str]) -> N
     }
     a = client.post("/v1/chat/completions", headers=auth_header, json=payload)
     assert a.status_code == 200
+    assert a.headers["X-Cradle-Upstream"] == "default"
     assert a.headers["X-Cradle-Cache"] in {"MISS", "HIT-L2"}
     b = client.post("/v1/chat/completions", headers=auth_header, json=payload)
     assert b.status_code == 200

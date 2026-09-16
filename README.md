@@ -40,7 +40,19 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-Drop-in: change the client `base_url` to Cradle (or bind Cradle on the port your clients already use) and set `CRADLE_UPSTREAM_BASE_URL` to the real provider. Cache entries are isolated by SHA-256 of the presented Bearer token. Optional `auth.keys` in YAML is an allowlist if you want Cradle-issued keys instead.
+Drop-in: point the client at Cradle and keep its normal API key. Cache entries are isolated by SHA-256 of the presented Bearer token. Optional `auth.keys` in YAML is an allowlist if you want Cradle-issued keys instead.
+
+### Clients (OpenAI-compatible)
+
+| Client | Point at Cradle |
+|---|---|
+| Codex CLI | `openai_base_url` or `[model_providers.cradle] base_url` in `~/.codex/config.toml` |
+| Grok CLI | `model.<id>.base_url` / `GROK_XAI_API_BASE_URL` toward Cradle |
+| llama.cpp / LiteLLM / OpenAI SDK | `OPENAI_BASE_URL=http://<cradle>:8000/v1` |
+
+Cradle picks the **backend** from the request `model` via `routes` in `config/cradle.yaml` (`gpt-*` → OpenAI, `grok-*` → xAI, `*` → local llama.cpp / LiteLLM). Unmatched models use `upstream.base_url`.
+
+**Claude Code** talks the Anthropic Messages API (`ANTHROPIC_BASE_URL`, `/v1/messages`), not OpenAI `/v1/chat/completions`. Point it at LiteLLM (or similar) that already speaks Anthropic, or wait for a Cradle Anthropic adapter. Do not set `ANTHROPIC_BASE_URL` to Cradle today.
 
 ## Ops notes
 

@@ -11,6 +11,7 @@ auth:
   allow_insecure_loopback: false
   keys: []
 
+# Fallback when no route matches (llama.cpp / LiteLLM / etc).
 upstream:
   base_url: http://127.0.0.1:8080/v1
   api_key_env: CRADLE_UPSTREAM_API_KEY
@@ -18,6 +19,28 @@ upstream:
   pass_through_client_auth: true
   models_passthrough: false
   models: ["gpt-4o-mini"]
+
+# Named OpenAI-compatible backends. First matching route wins.
+# upstreams:
+#   openai:
+#     base_url: https://api.openai.com/v1
+#     models: ["gpt-4o", "gpt-4o-mini"]
+#   xai:
+#     base_url: https://api.x.ai/v1
+#     models: ["grok-4", "grok-3"]
+#   litellm:
+#     base_url: http://127.0.0.1:4000/v1
+# routes:
+#   - model: "gpt-*"
+#     to: openai
+#   - model: "o1-*"
+#     to: openai
+#   - model: "o3-*"
+#     to: openai
+#   - model: "grok-*"
+#     to: xai
+#   - model: "*"
+#     to: default
 
 features:
   cache: true

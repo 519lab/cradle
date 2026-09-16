@@ -104,7 +104,7 @@ Locked. Not a menu.
 | 17 | Thread pools | **Dedicated `embed_pool(max_workers=1)` via `loop.run_in_executor`.** L1/L2 KV on the **default** executor. Never `asyncio.to_thread` for ONNX. | `to_thread` uses the default pool; ONNX would stall L1 p99. |
 | 18 | `pipeline_version` | **Top-level `settings.pipeline_version` only.** | One path. Hash, L1 tag, L2 payload, `X-Cradle-Pipeline` all read this. |
 | 19 | Identity / license | **Local git only. MIT. No GitHub remote until Greg says so. No PyPI.** | `main` + `develop` initialized locally. Do not `git remote add` / `gh repo create` / trusted-publishing. |
-| 20 | Default upstream | **`http://127.0.0.1:8080/v1`**. Override `CRADLE_UPSTREAM_BASE_URL`. | Conventional local llama.cpp / vLLM OpenAI-compat bind. Not `api.openai.com`. Cradle itself listens on **8000** so the two do not collide. |
+| 20 | Default upstream | **`http://127.0.0.1:8080/v1`**. Override `CRADLE_UPSTREAM_BASE_URL`. Optional `upstreams` + `routes` (`fnmatch` on `model`). | One fallback plus named OpenAI-compatible backends (OpenAI, xAI, LiteLLM, llama.cpp). Anthropic `/v1/messages` is not v1. |
 
 ---
 

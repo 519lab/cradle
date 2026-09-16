@@ -11,6 +11,7 @@
 
 - Product copy: Cradle is a gateway clients point at, not a local companion app for a model runtime.
 - Default auth is intercept mode: no Cradle API key. Client `Authorization` is forwarded upstream; cache isolation is SHA-256 of that token. Optional `auth.keys` remains an allowlist.
+- Model glob `routes` send a request to a named OpenAI-compatible `upstreams` entry (OpenAI, xAI, llama.cpp, LiteLLM). Unmatched models use `upstream.base_url`.
 
 ### Fixed
 
