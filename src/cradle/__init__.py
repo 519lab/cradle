@@ -1,3 +1,3 @@
-"""Cradle: local semantic cache and token-compression proxy."""
+"""Cradle: pass-through API gateway with semantic cache and token compression."""
 
 __version__ = "0.1.0"

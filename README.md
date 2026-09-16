@@ -1,22 +1,26 @@
 # Cradle
 
-Self-hosted OpenAI-compatible proxy that sits in front of a local (or remote) LLM API:
+Pass-through API gateway for OpenAI-compatible LLM APIs. Point clients at Cradle; it caches similar prompts, compresses misses, and forwards the rest upstream.
+
+Same `/v1/chat/completions` contract as the provider. Caching and compression run on CPU in the gateway process — they are not a separate “local LLM app.”
 
 1. **L1** exact-match cache (SHA-256, diskcache, p99 &lt; 2 ms lookup)
 2. **L2** semantic cache (FastEmbed `BAAI/bge-small-en-v1.5` + Qdrant local, p99 &lt; 25 ms including embed on a warm, single in-flight model)
 3. On miss: strip conversational fluff, call upstream, wrap the answer with a local prefix/suffix, write back both caches
 
-No Redis. No Qdrant server process. No Ollama. Caching/compression run on CPU.
+No Redis. No Qdrant server process. No Ollama.
 
 ## Quick start
 
+Point the OpenAI SDK (or any compatible client) at Cradle’s base URL instead of the provider. Cradle forwards to `upstream.base_url`.
+
 ```bash
-cp .env.example .env   # set CRADLE_API_KEY
+cp .env.example .env   # CRADLE_API_KEY, CRADLE_UPSTREAM_API_KEY
 uv sync --group dev
 uv run python -m cradle
 ```
 
-Cradle listens on `http://127.0.0.1:8000`. Default upstream is `http://127.0.0.1:8080/v1` (llama.cpp / vLLM OpenAI-compat). Override with `CRADLE_UPSTREAM_BASE_URL` (example: `https://api.openai.com/v1`).
+Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0.1:8080/v1`; set `CRADLE_UPSTREAM_BASE_URL` to the real provider (e.g. `https://api.openai.com/v1`). For a service deploy, `compose.yml` binds `0.0.0.0:8000`.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -25,7 +29,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-One proxy key ⇒ one `user_id`. Add more keys in `config/cradle.yaml` `auth.keys`.
+One gateway key ⇒ one `user_id`. Add more keys in `config/cradle.yaml` `auth.keys`. The client never sees the upstream key.
 
 ## Ops notes
 
@@ -34,6 +38,7 @@ One proxy key ⇒ one `user_id`. Add more keys in `config/cradle.yaml` `auth.key
 - `/metrics` requires the same Bearer key by default.
 - MIT license. Local git only — no GitHub remote and no PyPI in v1.
 - Reconstruction is a prefix/suffix envelope (partial PRD FR-3.1). Structural distillation is off (`features.structure: false`).
+- This is a gateway, not an inference runtime: it does not load a chat model. Upstream is whatever OpenAI-compatible API you configure.
 
 ## Metrics
 

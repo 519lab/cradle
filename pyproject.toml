@@ -1,7 +1,7 @@
 [project]
 name = "cradle"
 version = "0.1.0"
-description = "Local semantic cache and token-compression proxy for OpenAI-compatible APIs"
+description = "Pass-through API gateway that caches similar prompts and compresses misses in front of OpenAI-compatible LLM APIs"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE" }

@@ -1,6 +1,6 @@
 # Cradle
 
-Local semantic cache + token-compression proxy in front of an OpenAI-compatible LLM.
+Pass-through API gateway for OpenAI-compatible LLM APIs: cache similar prompts, compress misses, forward the rest upstream.
 
 ## Branch model
 
