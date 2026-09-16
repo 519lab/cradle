@@ -5,7 +5,9 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE /app/
 COPY src /app/src
 COPY config /app/config
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    && mkdir -p /data \
+    && chown cradle:cradle /data
 USER cradle
 ENV CRADLE_SERVER__HOST=0.0.0.0
 ENV CRADLE_DATA_DIR=/data

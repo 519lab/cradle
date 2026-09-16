@@ -174,3 +174,64 @@ def test_n_not_one_uncacheable() -> None:
     req = ChatRequest(model="m", n=2, messages=[ChatMessage(role="user", content="hi")])
     c = canonicalize(req, p, s)
     assert is_cacheable(c, req, s) is False
+
+
+def test_pass_through_client_auth(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tests.fake_upstream as fu
+
+    monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
+        features=FeatureFlags(l2=False, cache=False, compression=False, reconstruction=False),
+        upstream=UpstreamSettings(base_url="http://upstream/v1", pass_through_client_auth=True),
+    )
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_app), base_url="http://upstream")
+    app = create_app(settings=settings, embedder=FakeEmbedder(), http=http)
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer test-key-aaaaaaaa"},
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 200
+    assert fu.last_authorization == "Bearer test-key-aaaaaaaa"
+
+
+def test_oversized_body(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from cradle.config import ServerSettings
+
+    monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        server=ServerSettings(max_body_bytes=32),
+        auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
+        features=FeatureFlags(l2=False, cache=False),
+        upstream=UpstreamSettings(base_url="http://upstream/v1"),
+    )
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_app), base_url="http://upstream")
+    app = create_app(settings=settings, embedder=FakeEmbedder(), http=http)
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer test-key-aaaaaaaa"},
+            json={"model": "m", "messages": [{"role": "user", "content": "x" * 200}]},
+        )
+        assert r.status_code == 413
+
+
+def test_multi_worker_refused(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
+        features=FeatureFlags(l2=True, cache=True),
+        l2=L2Settings(mode="local"),
+        upstream=UpstreamSettings(base_url="http://upstream/v1"),
+    )
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_app), base_url="http://upstream")
+    app = create_app(settings=settings, embedder=FakeEmbedder(), http=http)
+    with pytest.raises(RuntimeError, match="WEB_CONCURRENCY"):
+        with TestClient(app):
+            pass

@@ -34,7 +34,7 @@ from cradle.normalize import canonicalize, is_cacheable, l1_key, l2_eligible
 from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suffix
 from cradle.reconstruct.templates import template_for
 from cradle.tokens import count_chat_prompt
-from cradle.upstream.openai import UpstreamError, chat, chat_stream
+from cradle.upstream.openai import UpstreamError, chat, start_chat_stream
 
 if TYPE_CHECKING:
     from cradle.runtime import Runtime
@@ -72,11 +72,16 @@ def _upstream_payload(req: ChatRequest, messages: list[ChatMessage]) -> dict[str
     return payload
 
 
-def _choice_content(completion: dict[str, Any]) -> str:
-    choices = completion.get("choices") or [{}]
-    msg = (choices[0] or {}).get("message") or {}
-    content = msg.get("content") or ""
-    return content if isinstance(content, str) else str(content)
+def _client_auth(ctx: RequestContext) -> str | None:
+    return ctx.headers.get("authorization") or None
+
+
+def _upstream_error_response(ctx: RequestContext, exc: UpstreamError) -> JSONResponse:
+    m.upstream_errors.labels(status=str(exc.status)).inc()
+    status = 502 if exc.status >= 500 else exc.status
+    if isinstance(exc.body, dict):
+        return JSONResponse(exc.body, status_code=status, headers=_headers(ctx))
+    return openai_error(str(exc.body), "server_error", "upstream_error", status)
 
 
 async def _maybe_embed(runtime: Runtime, text: str, ctx: RequestContext) -> list[float] | None:
@@ -203,118 +208,145 @@ async def _miss(
 async def _miss_json(runtime, req, ctx, vec, compressed, payload) -> JSONResponse:
     t0 = time.perf_counter()
     try:
-        completion = await chat(runtime.http, runtime.settings, payload)
+        completion = await chat(
+            runtime.http, runtime.settings, payload, authorization=_client_auth(ctx)
+        )
     except UpstreamError as exc:
-        m.upstream_errors.labels(status=str(exc.status)).inc()
-        status = 502 if exc.status >= 500 else exc.status
-        if isinstance(exc.body, dict):
-            return JSONResponse(exc.body, status_code=status, headers=_headers(ctx))
-        return openai_error(str(exc.body), "server_error", "upstream_error", status)
+        return _upstream_error_response(ctx, exc)
     ctx.t_upstream_s = time.perf_counter() - t0
     usage = completion.get("usage") or {}
     ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
     t1 = time.perf_counter()
-    wrapped = merge(completion, compressed.template)
+    if ctx.layer_hit == "bypass":
+        out = completion
+    else:
+        out = merge(completion, compressed.template)
     ctx.t_reconstruct_s = time.perf_counter() - t1
     if ctx.layer_hit != "bypass" and ctx.canonical is not None:
         rec = record_from(
             ctx.canonical,
-            wrapped,
+            out,
             ctx.inbound_prompt_tokens,
             ctx.upstream_prompt_tokens,
             runtime.settings.cache.ttl_s,
         )
         await writeback(runtime, ctx.canonical, vec, rec)
     _observe(ctx)
-    return JSONResponse(wrapped, headers=_headers(ctx))
+    return JSONResponse(out, headers=_headers(ctx))
+
+
+def _sse_headers(ctx: RequestContext) -> dict[str, str]:
+    headers = _headers(ctx)
+    headers["Cache-Control"] = "no-cache"
+    headers["X-Accel-Buffering"] = "no"
+    return headers
 
 
 async def _miss_stream(runtime, req, ctx, vec, compressed, payload) -> JSONResponse | StreamingResponse:
+    t0 = time.perf_counter()
+    try:
+        resp = await start_chat_stream(
+            runtime.http, runtime.settings, payload, authorization=_client_auth(ctx)
+        )
+    except UpstreamError as exc:
+        return _upstream_error_response(ctx, exc)
+    ctx.t_upstream_s = time.perf_counter() - t0
+    headers = _sse_headers(ctx)
+    if ctx.layer_hit == "bypass":
+        return StreamingResponse(
+            _passthrough_bytes(resp, ctx),
+            media_type="text/event-stream",
+            headers=headers,
+        )
     outbound_id = f"chatcmpl-{uuid.uuid4().hex}"
     outbound_created = int(time.time())
     acc = StreamAccumulator(
         outbound_id=outbound_id, outbound_created=outbound_created, model=req.model
     )
-    headers = _headers(ctx)
-    headers["Cache-Control"] = "no-cache"
-    headers["X-Accel-Buffering"] = "no"
+    return StreamingResponse(
+        _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc),
+        media_type="text/event-stream",
+        headers=headers,
+    )
 
-    async def gen() -> AsyncIterator[bytes]:
-        t0 = time.perf_counter()
-        try:
-            stream = chat_stream(runtime.http, runtime.settings, payload)
-            first = True
-            async for line in stream:
-                if first:
-                    first = False
-                    yield encode_chunk(role_frame(outbound_id, outbound_created, req.model))
-                    prefix = wrap_prefix(compressed.template)
-                    if prefix:
-                        yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, prefix))
-                piece = parse_and_accumulate(line, acc)
-                if acc.error:
-                    yield encode_chunk(error_frame("upstream error"))
-                    yield encode_done()
-                    return
-                if piece:
-                    yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, piece))
-            ctx.t_upstream_s = time.perf_counter() - t0
-            if acc.tool_call_seen:
-                if acc.finish_reason:
-                    yield encode_chunk(
-                        finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason)
-                    )
-                yield encode_done()
-                return
-            if acc.finish_reason is None:
-                yield encode_chunk(finish_frame(outbound_id, outbound_created, req.model, "stop"))
-                yield encode_done()
-                return
-            suffix = wrap_suffix(compressed.template, acc.content)
-            if suffix:
-                yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, suffix))
-            yield encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason))
-            if _include_usage(req) and acc.usage:
-                yield encode_chunk(usage_frame(outbound_id, outbound_created, req.model, acc.usage))
-            yield encode_done()
-            usage = acc.usage or {}
-            ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
-            body = wrap_content(compressed.template, acc.content)
-            completion = {
-                "id": outbound_id,
-                "object": "chat.completion",
-                "created": outbound_created,
-                "model": req.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": body},
-                        "finish_reason": acc.finish_reason,
-                    }
-                ],
-                "usage": acc.usage or {},
-            }
-            if ctx.layer_hit != "bypass" and ctx.canonical is not None and not acc.error:
-                rec = record_from(
-                    ctx.canonical,
-                    completion,
-                    ctx.inbound_prompt_tokens,
-                    ctx.upstream_prompt_tokens,
-                    runtime.settings.cache.ttl_s,
-                )
-                await writeback(runtime, ctx.canonical, vec, rec)
-            _observe(ctx)
-        except UpstreamError as exc:
-            m.upstream_errors.labels(status=str(exc.status)).inc()
-            if acc.content_parts or acc.saw_done:
+
+async def _passthrough_bytes(resp, ctx: RequestContext) -> AsyncIterator[bytes]:
+    try:
+        async for chunk in resp.aiter_bytes():
+            yield chunk
+        _observe(ctx)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        await resp.aclose()
+
+
+async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccumulator) -> AsyncIterator[bytes]:
+    outbound_id = acc.outbound_id
+    outbound_created = acc.outbound_created
+    try:
+        first = True
+        async for line in resp.aiter_lines():
+            if first:
+                first = False
+                yield encode_chunk(role_frame(outbound_id, outbound_created, req.model))
+                prefix = wrap_prefix(compressed.template)
+                if prefix:
+                    yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, prefix))
+            piece = parse_and_accumulate(line, acc)
+            if acc.error:
                 yield encode_chunk(error_frame("upstream error"))
                 yield encode_done()
                 return
-            raise
-
-    try:
-        # Open stream inside generator so connect-fail before first byte can be JSON.
-        return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
-    except UpstreamError as exc:
-        status = 502 if exc.status >= 500 else exc.status
-        return openai_error(str(exc.body), "server_error", "upstream_error", status)
+            if acc.tool_call_seen:
+                yield encode_chunk(error_frame("unexpected tool_calls on wrap path"))
+                yield encode_done()
+                return
+            if piece:
+                yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, piece))
+        if acc.finish_reason is None:
+            yield encode_chunk(error_frame("upstream stream ended without finish_reason"))
+            yield encode_done()
+            return
+        suffix = wrap_suffix(compressed.template, acc.content)
+        if suffix:
+            yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, suffix))
+        yield encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason))
+        if _include_usage(req) and acc.usage:
+            yield encode_chunk(usage_frame(outbound_id, outbound_created, req.model, acc.usage))
+        yield encode_done()
+        usage = acc.usage or {}
+        ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
+        body = wrap_content(compressed.template, acc.content)
+        completion = {
+            "id": outbound_id,
+            "object": "chat.completion",
+            "created": outbound_created,
+            "model": req.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": body},
+                    "finish_reason": acc.finish_reason,
+                }
+            ],
+            "usage": acc.usage or {},
+        }
+        if acc.client_connected and ctx.layer_hit != "bypass" and ctx.canonical is not None:
+            rec = record_from(
+                ctx.canonical,
+                completion,
+                ctx.inbound_prompt_tokens,
+                ctx.upstream_prompt_tokens,
+                runtime.settings.cache.ttl_s,
+            )
+            await writeback(runtime, ctx.canonical, vec, rec)
+        _observe(ctx)
+    except asyncio.CancelledError:
+        acc.client_connected = False
+        raise
+    except GeneratorExit:
+        acc.client_connected = False
+        raise
+    finally:
+        await resp.aclose()

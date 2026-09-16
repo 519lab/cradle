@@ -3,7 +3,8 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from pydantic import ValidationError
 
 from cradle.gateway.context import RequestContext
 from cradle.gateway.errors import openai_error
@@ -44,7 +45,7 @@ async def metrics(request: Request) -> Response:
     rt = _runtime(request)
     if rt.settings.metrics.require_auth:
         result = await authenticate(request, rt.settings, rt.principals)
-        if hasattr(result, "status_code"):
+        if isinstance(result, JSONResponse):
             return result
     body, ctype = render()
     return PlainTextResponse(body, media_type=ctype)
@@ -54,19 +55,28 @@ async def metrics(request: Request) -> Response:
 async def models(request: Request):
     rt = _runtime(request)
     result = await authenticate(request, rt.settings, rt.principals)
-    if hasattr(result, "status_code"):
+    if isinstance(result, JSONResponse):
         return result
-    return await list_models(rt.http, rt.settings)
+    auth = request.headers.get("authorization")
+    return await list_models(rt.http, rt.settings, authorization=auth)
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(request: Request, body: ChatRequest):
+async def chat_completions(request: Request):
     rt = _runtime(request)
-    cl = request.headers.get("content-length")
-    if cl and int(cl) > rt.settings.server.max_body_bytes:
-        return openai_error("payload too large", "invalid_request_error", "payload_too_large", 413)
     principal = await authenticate(request, rt.settings, rt.principals)
-    if hasattr(principal, "status_code"):
+    if isinstance(principal, JSONResponse):
         return principal
-    ctx = RequestContext(request_id=str(uuid.uuid4()), principal=principal)
+    raw = await request.body()
+    if len(raw) > rt.settings.server.max_body_bytes:
+        return openai_error("payload too large", "invalid_request_error", "payload_too_large", 413)
+    try:
+        body = ChatRequest.model_validate_json(raw)
+    except ValidationError:
+        return openai_error("invalid request body", "invalid_request_error", "invalid_request", 400)
+    ctx = RequestContext(
+        request_id=str(uuid.uuid4()),
+        principal=principal,
+        headers={"authorization": request.headers.get("authorization") or ""},
+    )
     return await handle_chat(rt, body, ctx)

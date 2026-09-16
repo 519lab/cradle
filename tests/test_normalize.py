@@ -102,6 +102,13 @@ def test_stream_tools_uncacheable() -> None:
     assert is_cacheable(c, req, s) is False
 
 
+def test_stream_logprobs_uncacheable() -> None:
+    s = Settings()
+    req = _req(stream=True, logprobs=True)
+    c = canonicalize(req, _p(), s)
+    assert is_cacheable(c, req, s) is False
+
+
 def test_whitespace_and_nfkc() -> None:
     s = Settings()
     a = canonicalize(_req(messages=[ChatMessage(role="user", content="hello   world")]), _p(), s)

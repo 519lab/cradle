@@ -30,3 +30,13 @@ def test_metrics_requires_auth(client: TestClient, auth_header: dict[str, str]) 
     r = client.get("/metrics", headers=auth_header)
     assert r.status_code == 200
     assert b"cradle_" in r.content
+
+
+def test_invalid_json_is_400(client: TestClient, auth_header: dict[str, str]) -> None:
+    r = client.post(
+        "/v1/chat/completions",
+        headers={**auth_header, "content-type": "application/json"},
+        content=b"{not-json",
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "invalid_request"

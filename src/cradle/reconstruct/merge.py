@@ -30,6 +30,8 @@ def merge(completion: dict[str, Any], template: ReconstructionTemplate) -> dict[
         return out
     choice = dict(choices[0])
     message = dict(choice.get("message") or {})
+    if message.get("tool_calls"):
+        return out
     upstream = message.get("content") or ""
     if not isinstance(upstream, str):
         upstream = str(upstream)

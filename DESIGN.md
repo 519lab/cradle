@@ -95,8 +95,8 @@ Locked. Not a menu.
 | 8 | Auth | **One proxy Bearer key ⇒ one `{tenant_id, user_id}`**. Upstream key from env. Pass-through **off**. | No shared-tenant key. No `X-User-Id`. Client `user` does not override. |
 | 9 | Reconstruction v1 | **Prefix/suffix wrap.** No second LLM. No KV→essay expansion. | Partial FR-3.1. Stream-miss **tees** content; wrap is envelope around already-sent tokens, not a post-hoc rewrite. |
 | 10 | L1 canonicalization | **NFKC + selective whitespace + sorted JSON.** Closed generation-affecting allowlist **plus** sorted dump of remaining extras. | Includes `tool_choice`, `n`, `stop`, `seed`, `response_format`, penalties, `logit_bias`, `max_completion_tokens`. `None`/`[]`/`{}` canonicalized. |
-| 11 | Process model | **uvicorn `--workers 1`**. | Qdrant local is not a multi-writer. Startup **warn** if workers>1. |
-| 12 | Streaming cache | **Required in v1.** Hits: `synthesize_sse`. Misses: **wrap-mode tee** (prefix, tee `delta.content`, suffix, then finish). | Most clients send `stream: true`. Do not buffer the whole generation before TTFB. |
+| 11 | Process model | **uvicorn `--workers 1`**. | Qdrant local is not a multi-writer. Startup **refuses** if `WEB_CONCURRENCY` / `UVICORN_WORKERS` is set to anything other than `1`. |
+| 12 | Streaming cache | **Required in v1.** Hits: `synthesize_sse`. Cacheable misses: wrap-mode tee. **Bypass** (`stream+tools`, `n!=1`, logprobs, images): **raw SSE byte passthrough**. Connect failure before body: JSON OpenAI error, not SSE. | Most clients send `stream: true`. Bypass must remain a pass-through gateway. |
 | 13 | L2 eligibility | **Off when tools non-empty (`[]` counts as empty) or `len(messages) > l2.max_messages` (default 2).** | LiteLLM: semantic cache on agentic/multi-turn replays stale tool calls. **L1 still applies to non-stream tool calls.** `stream=true` **and** tools → **uncacheable** (pass-through; no L1/L2). |
 | 14 | Cosine threshold | **Default 0.90.** Config range intended **0.88–0.93**. Clamp **min 0.85**. | PRD: <0.85 → false hits. Optional `@pytest.mark.embed` pair set validates 0.90 against real BGE. |
 | 15 | Config format | **YAML file + `CRADLE_*` env overlay** via a custom pydantic-settings source. | YAML is not native; PR 1 implements the source. Secrets only in env. |
@@ -455,7 +455,7 @@ Cache(
    - L1/L2 sync calls: `loop.run_in_executor(None, ...)` (default pool).
 6. If `features.l2`: `FastEmbedEmbedder(cache_dir=data_dir / "models/fastembed", threads=settings.l2.onnx_threads, providers=["CPUExecutionProvider"], lazy_load=False)`. Warmup `embed("ok")`. If `len(vec) != settings.l2.dim`: **startup error**. Set `os.environ["FASTEMBED_CACHE_PATH"]` to that cache_dir.
 7. If `features.local_1b` and extra missing: **startup error**. No silent fallback.
-8. If `features.l2` and workers>1 (env `WEB_CONCURRENCY` / uvicorn workers): log **warning**.
+8. If `features.l2` and workers>1 (env `WEB_CONCURRENCY` / `UVICORN_WORKERS`): **startup error**.
 9. Background purge every `cache.purge_interval_s` (default 300): `l1.expire()`, L2 delete `expires_at < now`, set `cradle_l2_points`. If count > 20_000: log **warning** (official local-mode threshold).
 10. Shutdown: pool.shutdown, diskcache.close, qdrant.close.
 
@@ -600,7 +600,7 @@ auth:
 
 A second person gets a **second** key entry with its own `user_id`. Unset `token_env` → refuse to start unless `auth.allow_insecure_loopback: true` **and** bind is loopback.
 
-Upstream: Bearer from `CRADLE_UPSTREAM_API_KEY`. `upstream.pass_through_client_auth: false`.
+Upstream: Bearer from `CRADLE_UPSTREAM_API_KEY`. When `upstream.pass_through_client_auth: true`, forward the client's `Authorization` header instead.
 
 ---
 
@@ -1311,7 +1311,7 @@ Flags off-safe. Rollback: flags off, or delete data dirs, or revert on `develop`
 | Qdrant local >20k points | **High** | Gauge `cradle_l2_points`; log warning at 20k; README: move to server later. ~0.23 unique L2 writes/s fills 20k in 24h TTL — a small team, not hyperscale. Do not pretend local mode scales past the library warning. |
 | L1 p99 > 2 ms (Pydantic validate, HDD, shared pool) | Medium | Timer is production `get_sync`; ONNX on `embed_pool`; JSON bytes; latency test; `CRADLE_SKIP_LATENCY` for noisy CI; optional later TTLCache front **out of v1**. |
 | Concurrent L2 p99 miss | Medium | Document single-in-flight-embed budget; histogram `stage="embed"`. |
-| L2 local multi-writer | Medium | workers=1; startup warn. |
+| L2 local multi-writer | Medium | workers=1; startup refuses `WEB_CONCURRENCY`/`UVICORN_WORKERS` ≠ 1. |
 | FastEmbed `/tmp` re-download | Medium | Always set `cache_dir`. |
 | Qdrant no TTL | Low | `expires_at` filter + purge. |
 | tiktoken ≠ vendor tokenizer | Low | Prefer upstream `usage.prompt_tokens`. |
