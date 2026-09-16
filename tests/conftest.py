@@ -7,7 +7,6 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from tests.fake_upstream import fake_app
 
 from cradle.app import create_app
 from cradle.config import (
@@ -19,6 +18,7 @@ from cradle.config import (
     UpstreamSettings,
 )
 from cradle.embeddings.fake import FakeEmbedder
+from tests.fake_upstream import fake_app
 
 ROOT = Path(__file__).resolve().parents[1]
 
