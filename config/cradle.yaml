@@ -1,0 +1,61 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+  max_body_bytes: 1048576
+
+data_dir: ./data
+
+pipeline_version: v1
+
+auth:
+  allow_insecure_loopback: false
+  keys:
+    - token_env: CRADLE_API_KEY
+      tenant_id: default
+      user_id: default
+
+upstream:
+  base_url: http://127.0.0.1:8080/v1
+  api_key_env: CRADLE_UPSTREAM_API_KEY
+  timeout_s: 120
+  pass_through_client_auth: false
+  models_passthrough: false
+  models: ["gpt-4o-mini"]
+
+features:
+  cache: true
+  compression: true
+  structure: false
+  l2: true
+  reconstruction: true
+  local_1b: false
+
+cache:
+  ttl_s: 86400
+  max_temperature: 1.0
+  evict_old_pipeline: true
+  purge_interval_s: 300
+  l1_size_limit_bytes: 1000000000
+
+l2:
+  mode: local
+  collection: cradle_l2
+  cosine_threshold: 0.90
+  max_messages: 2
+  embed_timeout_s: 2.0
+  model: BAAI/bge-small-en-v1.5
+  dim: 384
+  onnx_threads: null
+  points_warn: 20000
+
+compress:
+  structure_min_chars: 400
+  min_tokens: 16
+
+reconstruct:
+  mode: wrap
+  tenants: {}
+
+metrics:
+  enabled: true
+  require_auth: true
