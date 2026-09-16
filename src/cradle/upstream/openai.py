@@ -46,11 +46,17 @@ async def chat(
 ) -> dict[str, Any]:
     body = dict(payload)
     body.pop("stream", None)
-    resp = await client.post(
-        _url(settings, "/chat/completions"),
-        json=body,
-        headers=_headers(settings, authorization),
-    )
+    try:
+        resp = await client.post(
+            _url(settings, "/chat/completions"),
+            json=body,
+            headers=_headers(settings, authorization),
+        )
+    except httpx.RequestError as exc:
+        raise UpstreamError(
+            502,
+            {"error": {"message": str(exc), "type": "server_error", "code": "upstream_error"}},
+        ) from exc
     if resp.status_code >= 400:
         try:
             data = resp.json()
@@ -74,7 +80,13 @@ async def start_chat_stream(
         json=body,
         headers=_headers(settings, authorization),
     )
-    resp = await client.send(request, stream=True)
+    try:
+        resp = await client.send(request, stream=True)
+    except httpx.RequestError as exc:
+        raise UpstreamError(
+            502,
+            {"error": {"message": str(exc), "type": "server_error", "code": "upstream_error"}},
+        ) from exc
     if resp.status_code >= 400:
         raw = (await resp.aread()).decode("utf-8", "replace")
         await resp.aclose()

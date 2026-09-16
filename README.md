@@ -20,7 +20,18 @@ uv sync --group dev
 uv run python -m cradle
 ```
 
-Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0.1:8080/v1`; set `CRADLE_UPSTREAM_BASE_URL` to the real provider (e.g. `https://api.openai.com/v1`). For a service deploy, `compose.yml` binds `0.0.0.0:8000`.
+Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0.1:8080/v1`; set `CRADLE_UPSTREAM_BASE_URL` to the real provider (e.g. `https://api.openai.com/v1`).
+
+## Docker
+
+```bash
+cp .env.example .env   # CRADLE_API_KEY (required at runtime)
+docker compose up --build
+```
+
+Gateway is at `http://127.0.0.1:8000`. Compose default upstream is `http://host.docker.internal:8080/v1` (a server on the host, not `127.0.0.1` inside the container). Override with `CRADLE_UPSTREAM_BASE_URL`. L1/L2 state is the `cradle-data` volume (`/data`). FastEmbed weights are baked at `/opt/cradle/models/fastembed` so the volume does not hide them.
+
+The image does **not** declare `VOLUME /data`. CI uses `compose.ci.yml` with tmpfs on `/data` and L2 off.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -36,7 +47,7 @@ One gateway key ⇒ one `user_id`. Add more keys in `config/cradle.yaml` `auth.k
 - **Qdrant local is not recommended above 20,000 points** (`QdrantLocal.LARGE_DATA_THRESHOLD`). The scale path is a Qdrant **server** (`l2.mode: server` later, not implemented in v1), not more local-mode tuning. Watch `cradle_l2_points`.
 - Dockerfile does **not** declare `VOLUME /data`. CI compose uses tmpfs on `/data`.
 - `/metrics` requires the same Bearer key by default.
-- MIT license. Local git only — no GitHub remote and no PyPI in v1.
+- MIT license. GitHub: `519lab/cradle`. No PyPI in v1.
 - Reconstruction is a prefix/suffix envelope (partial PRD FR-3.1). Structural distillation is off (`features.structure: false`).
 - This is a gateway, not an inference runtime: it does not load a chat model. Upstream is whatever OpenAI-compatible API you configure.
 

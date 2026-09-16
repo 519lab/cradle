@@ -36,7 +36,11 @@ def _reject_multi_worker(settings: Settings) -> None:
 
 def _ensure_data_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, stat.S_IRWXU)
+    try:
+        os.chmod(path, stat.S_IRWXU)
+    except PermissionError:
+        if not os.access(path, os.W_OK | os.X_OK):
+            raise
 
 
 def _build_embedder(settings: Settings, override: Embedder | None) -> Embedder | None:
@@ -44,9 +48,9 @@ def _build_embedder(settings: Settings, override: Embedder | None) -> Embedder |
         return override
     if not settings.features.l2:
         return None
-    from cradle.embeddings.fastembed import FastEmbedEmbedder
+    from cradle.embeddings.fastembed import FastEmbedEmbedder, resolve_cache_dir
 
-    cache_dir = settings.data_dir / "models" / "fastembed"
+    cache_dir = resolve_cache_dir(settings.data_dir)
     os.environ["FASTEMBED_CACHE_PATH"] = str(cache_dir)
     return FastEmbedEmbedder(
         cache_dir=cache_dir,

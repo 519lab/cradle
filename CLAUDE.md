@@ -19,6 +19,8 @@ uv run ruff check .
 uv run pytest
 uv run pytest --cov=cradle --cov-report=term-missing --cov-fail-under=90
 uv run python -m cradle
+docker compose -f compose.ci.yml build
+docker compose up --build
 ```
 
 Optional real-BGE pair eval (downloads the ONNX model):

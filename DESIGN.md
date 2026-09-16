@@ -1277,13 +1277,13 @@ Per-process from settings, not per-request headers.
 
 Default path: `uv run python -m cradle`.
 
-`compose.yml`: proxy only, `CRADLE_SERVER__HOST: 0.0.0.0`, `CRADLE_DATA_DIR: /data`, bind `8000:8000`. **`metrics.require_auth` stays true.** No redis/qdrant/postgres. Default upstream remains `http://127.0.0.1:8080/v1` (host-reachable llama.cpp/vLLM, not another compose service).
+`compose.yml`: proxy only, `CRADLE_SERVER__HOST: 0.0.0.0`, `CRADLE_DATA_DIR: /data`, bind `8000:8000`. **`metrics.require_auth` stays true.** No redis/qdrant/postgres. Compose default upstream is `http://host.docker.internal:8080/v1` (`extra_hosts: host-gateway`) so a host-side OpenAI-compatible server is reachable; override with `CRADLE_UPSTREAM_BASE_URL`. FastEmbed weights live at `FASTEMBED_CACHE_PATH` (`/opt/cradle/models/fastembed` in the image), **not** under `/data`, so the data volume does not hide baked models.
 
-**Dockerfile must not `VOLUME /data`.** `compose.ci.yml`: `tmpfs: ["/data"]`.
+**Dockerfile must not `VOLUME /data`.** Multi-stage `uv sync --frozen`. `compose.ci.yml`: `tmpfs: ["/data"]`, `BAKE_EMBEDDINGS=0`, `CRADLE_FEATURES__L2=false`.
 
 Healthcheck: `GET /readyz`.
 
-README must state: Qdrant local is **not recommended above 20k points** (`QdrantLocal.LARGE_DATA_THRESHOLD`). The fix is Qdrant **server** (`l2.mode: server` later), not more local-mode tuning. v1 does not implement server mode. README also documents default upstream `http://127.0.0.1:8080/v1`, override `CRADLE_UPSTREAM_BASE_URL` (example: `https://api.openai.com/v1`), Cradle listen `127.0.0.1:8000`, MIT, local git only (no GitHub remote, no PyPI), and one key ⇒ one `user_id`.
+README must state: Qdrant local is **not recommended above 20k points** (`QdrantLocal.LARGE_DATA_THRESHOLD`). The fix is Qdrant **server** (`l2.mode: server` later), not more local-mode tuning. v1 does not implement server mode. README also documents Compose vs `uv run`, `CRADLE_UPSTREAM_BASE_URL` (example: `https://api.openai.com/v1`), Cradle listen `:8000`, MIT, GitHub `519lab/cradle`, no PyPI, and one key ⇒ one `user_id`.
 
 ---
 
