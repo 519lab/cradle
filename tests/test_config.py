@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from cradle.config import L2Settings, load_settings
+
+
+def test_yaml_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(Path("config/cradle.yaml")))
+    s = load_settings()
+    assert s.server.port == 8000
+    assert s.upstream.base_url.endswith(":8080/v1")
+    assert s.features.structure is False
+    assert s.pipeline_version == "v1"
+
+
+def test_env_overrides_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRADLE_CONFIG", str(Path("config/cradle.yaml")))
+    monkeypatch.setenv("CRADLE_SERVER__PORT", "9001")
+    monkeypatch.setenv("CRADLE_PIPELINE_VERSION", "vtest")
+    s = load_settings()
+    assert s.server.port == 9001
+    assert s.pipeline_version == "vtest"
+
+
+def test_flat_upstream_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRADLE_CONFIG", str(Path("config/cradle.yaml")))
+    monkeypatch.setenv("CRADLE_UPSTREAM_BASE_URL", "http://127.0.0.1:9999/v1/")
+    s = load_settings()
+    assert s.upstream.base_url == "http://127.0.0.1:9999/v1"
+
+
+def test_cosine_floor() -> None:
+    with pytest.raises(ValidationError):
+        L2Settings(cosine_threshold=0.84)

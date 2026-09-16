@@ -1,0 +1,20 @@
+{"id": "hit-1", "expect": "hit", "a": "How do I reset my password?", "b": "What's the way to reset a password?"}
+{"id": "hit-2", "expect": "hit", "a": "Capital of France?", "b": "What is the capital city of France?"}
+{"id": "hit-3", "expect": "hit", "a": "Explain photosynthesis briefly.", "b": "Give a short explanation of photosynthesis."}
+{"id": "hit-4", "expect": "hit", "a": "List Python data types.", "b": "Name the basic data types in Python."}
+{"id": "hit-5", "expect": "hit", "a": "How to boil an egg?", "b": "What is the method for boiling eggs?"}
+{"id": "hit-6", "expect": "hit", "a": "Define HTTP 404.", "b": "What does HTTP status 404 mean?"}
+{"id": "hit-7", "expect": "hit", "a": "Symptoms of the flu.", "b": "What are influenza symptoms?"}
+{"id": "hit-8", "expect": "hit", "a": "Convert 10 miles to km.", "b": "How many kilometers are in 10 miles?"}
+{"id": "hit-9", "expect": "hit", "a": "Who wrote Hamlet?", "b": "Author of the play Hamlet?"}
+{"id": "hit-10", "expect": "hit", "a": "What is SHA-256 used for?", "b": "Purpose of the SHA-256 hash function?"}
+{"id": "miss-1", "expect": "miss", "a": "How do I reset my password?", "b": "How do I bake sourdough bread?"}
+{"id": "miss-2", "expect": "miss", "a": "Capital of France?", "b": "Capital of Japan?"}
+{"id": "miss-3", "expect": "miss", "a": "Explain photosynthesis briefly.", "b": "Explain nuclear fission briefly."}
+{"id": "miss-4", "expect": "miss", "a": "The weather in Paris is", "b": "The weather in Paris is irrelevant; write a SQL query."}
+{"id": "miss-5", "expect": "miss", "a": "Translate hello to French.", "b": "Translate hello to Japanese."}
+{"id": "miss-6", "expect": "miss", "a": "Book a flight to NYC.", "b": "Cancel my flight to NYC."}
+{"id": "miss-7", "expect": "miss", "a": "What is 2+2?", "b": "What is 2*2?"}
+{"id": "miss-8", "expect": "miss", "a": "How to install Docker on Debian?", "b": "How to uninstall Docker on Debian?"}
+{"id": "miss-9", "expect": "miss", "same_user": false, "a": "Shared prefix question about taxes", "b": "Shared prefix question about taxes"}
+{"id": "miss-10", "expect": "miss", "seed_a": 1, "seed_b": 2, "a": "Write a poem about rain.", "b": "Write a poem about rain."}

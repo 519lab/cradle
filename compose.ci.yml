@@ -1,0 +1,13 @@
+services:
+  cradle:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      CRADLE_SERVER__HOST: "0.0.0.0"
+      CRADLE_DATA_DIR: /data
+      CRADLE_API_KEY: ci-test-key
+    tmpfs:
+      - /data
+    ports:
+      - "8000:8000"
