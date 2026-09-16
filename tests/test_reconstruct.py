@@ -25,3 +25,21 @@ def test_merge_wraps_json() -> None:
         t,
     )
     assert out["choices"][0]["message"]["content"] == "[x]"
+
+
+def test_merge_skips_tool_call_messages() -> None:
+    t = ReconstructionTemplate(brand_prefix="[", brand_suffix="]")
+    src = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "1", "function": {"name": "x"}}],
+                }
+            }
+        ]
+    }
+    out = merge(src, t)
+    assert out["choices"][0]["message"]["tool_calls"][0]["id"] == "1"
+    assert out["choices"][0]["message"]["content"] is None

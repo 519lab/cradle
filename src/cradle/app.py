@@ -23,6 +23,17 @@ from cradle.tenancy import assert_auth_ready, load_principals
 log = logging.getLogger("cradle")
 
 
+def _reject_multi_worker(settings: Settings) -> None:
+    if not settings.features.l2:
+        return
+    for var in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = os.environ.get(var, "").strip()
+        if raw and raw != "1":
+            raise RuntimeError(
+                f"{var}={raw} is incompatible with Qdrant local L2; v1 requires a single worker"
+            )
+
+
 def _ensure_data_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, stat.S_IRWXU)
@@ -84,9 +95,7 @@ def create_app(
             embedder_ready = resolved_embedder.ready()
             m.ready_gauge.labels(component="embedder").set(1 if embedder_ready else 0)
 
-        workers = os.environ.get("WEB_CONCURRENCY", "1")
-        if settings.features.l2 and str(workers) not in {"1", ""}:
-            log.warning("uvicorn workers>1 is unsupported with Qdrant local (v1 is workers=1)")
+        _reject_multi_worker(settings)
 
         embed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cradle-embed")
         client = http or httpx.AsyncClient(timeout=settings.upstream.timeout_s)

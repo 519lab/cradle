@@ -203,7 +203,7 @@ def is_cacheable(canonical: CanonicalRequest, req: ChatRequest, settings: Settin
         return False
     if has_non_text_parts(req.messages):
         return False
-    if req.stream and canonical.has_tools:
+    if req.stream and (canonical.has_tools or req.logprobs):
         return False
     return True
 

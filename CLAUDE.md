@@ -9,7 +9,7 @@ Pass-through API gateway for OpenAI-compatible LLM APIs: cache similar prompts, 
 - Never commit directly to `develop` or `main`.
 - Conventional Commits with scope (`feat(cache):`, `fix(gateway):`).
 - Changelog under `## [Unreleased]`.
-- Local git only in v1 — no GitHub remote, no PyPI.
+- Remote: `https://github.com/519lab/cradle`. No PyPI in v1.
 
 ## Commands
 
@@ -34,6 +34,8 @@ CRADLE_SKIP_LATENCY=1 uv run pytest
 ```
 
 Default config: `config/cradle.yaml`. Override upstream with `CRADLE_UPSTREAM_BASE_URL`. Proxy listen is `127.0.0.1:8000`. One `CRADLE_API_KEY` maps to one `user_id`.
+
+L2 (Qdrant local) requires a **single** uvicorn worker. `WEB_CONCURRENCY` / `UVICORN_WORKERS` other than `1` is a startup error. Bypass streams (`stream+tools`, `n!=1`, logprobs) are raw SSE passthrough; cacheable stream misses still wrap text completions.
 
 ## Layout
 
