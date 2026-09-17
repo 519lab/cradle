@@ -71,6 +71,10 @@ class CacheRecord(BaseModel):
     pipeline_version: str
     prompt_hash: str
     embed_text_hash: str
+    # Raw role-framed embed text, kept so the L2 precision guard (issue #5) can
+    # compare a candidate against the query at serve time. Empty on records
+    # written before the guard existed; the guard fails those closed ("no-text").
+    embed_text: str = ""
     response: dict[str, Any]
     created_at: int
     expires_at: int
