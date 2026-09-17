@@ -10,9 +10,24 @@ from cradle.compress.guards import extract_protected, restore_protected
 from cradle.config import Settings
 from cradle.gateway.models import ChatMessage, ChatRequest
 
-HASH_SCHEMA_VERSION = 1
+# Bumped to 2: cache identity now includes the resolved backend namespace and
+# excludes routing-only hints (see cache_namespace + _ROUTING_HINTS). Old L1/L2
+# entries written under schema 1 miss safely and age out on TTL.
+HASH_SCHEMA_VERSION = 2
 _KNOWN_REQUEST = set(ChatRequest.model_fields)
 _KNOWN_MESSAGE = set(ChatMessage.model_fields)
+
+# Undeclared request fields that steer PROVIDER-side caching/routing/abuse
+# monitoring but do not change the generated answer. They must not enter the
+# cache key, or two identical prompts differing only by a hint split into
+# separate L1 entries (bug B). Same rationale as excluding `stream`. The
+# declared `user` field is already dropped (never carried into the canonical
+# form), so it is not listed here.
+_ROUTING_HINTS = frozenset({
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "safety_identifier",
+})
 
 
 def _stable_json(obj: Any) -> str:
@@ -71,6 +86,7 @@ def hash_input(c: CanonicalRequest) -> dict[str, Any]:
         "tenant_id": c.tenant_id,
         "user_id": c.user_id,
         "model": c.model,
+        "backend_namespace": c.backend_namespace,
         "system_prompt_version": c.system_prompt_version,
         "pipeline_version": c.pipeline_version,
         "temperature": c.temperature,
@@ -129,7 +145,24 @@ def has_non_text_parts(messages: list[ChatMessage]) -> bool:
     return False
 
 
-def canonicalize(req: ChatRequest, principal: Principal, settings: Settings) -> CanonicalRequest:
+def cache_namespace(target_name: str, base_url: str) -> str:
+    """Stable, non-secret namespace for the resolved backend (bug A).
+
+    Two named backends serving the same model glob (or a `routes:` change that
+    repoints a glob) must not share cache entries, or Cradle replays the old
+    backend's answers. Hash the route target name + normalized base URL.
+    """
+    norm = base_url.rstrip("/").lower()
+    blob = f"{target_name}|{norm}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def canonicalize(
+    req: ChatRequest,
+    principal: Principal,
+    settings: Settings,
+    backend_namespace: str = "",
+) -> CanonicalRequest:
     uncacheable: str | None = None
     messages: list[CanonicalMessage] = []
     for m in req.messages:
@@ -153,7 +186,11 @@ def canonicalize(req: ChatRequest, principal: Principal, settings: Settings) -> 
             )
         )
 
-    extras = {k: _sort_json(v) for k, v in (req.model_extra or {}).items() if k not in _KNOWN_REQUEST}
+    extras = {
+        k: _sort_json(v)
+        for k, v in (req.model_extra or {}).items()
+        if k not in _KNOWN_REQUEST and k not in _ROUTING_HINTS
+    }
     tools = _empty_to_none(_sort_json(req.tools))
     tool_choice = _empty_to_none(_sort_json(req.tool_choice))
     logit_bias = _empty_to_none(_sort_json(req.logit_bias))
@@ -163,6 +200,7 @@ def canonicalize(req: ChatRequest, principal: Principal, settings: Settings) -> 
         tenant_id=principal.tenant_id,
         user_id=principal.user_id,
         model=req.model,
+        backend_namespace=backend_namespace,
         system_prompt_version="",
         pipeline_version=settings.pipeline_version,
         temperature=_round6(req.temperature),

@@ -40,6 +40,9 @@ def _must_filter(filt: L2Filter) -> Filter:
             FieldCondition(key="user_id", match=MatchValue(value=filt.user_id)),
             FieldCondition(key="model", match=MatchValue(value=filt.model)),
             FieldCondition(
+                key="backend_namespace", match=MatchValue(value=filt.backend_namespace)
+            ),
+            FieldCondition(
                 key="system_prompt_version", match=MatchValue(value=filt.system_prompt_version)
             ),
             FieldCondition(key="pipeline_version", match=MatchValue(value=filt.pipeline_version)),
