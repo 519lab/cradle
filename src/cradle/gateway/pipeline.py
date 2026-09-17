@@ -217,13 +217,12 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             return _replay(req, ctx, rec)
 
     vec: list[float] | None = None
-    if (
-        not ctx.cache_no_read
-        and l2_eligible(canonical, req, runtime.settings)
-        and runtime.qdrant is not None
-    ):
+    if l2_eligible(canonical, req, runtime.settings) and runtime.qdrant is not None:
+        # Embed even on no-cache/refresh: only the L2 *read* is skipped. The
+        # writeback needs the vector to replace the stale L2 point, otherwise a
+        # refresh updates L1 alone and paraphrases keep replaying the old answer.
         vec = await _maybe_embed(runtime, canonical.embed_text, ctx)
-        if vec is not None:
+        if vec is not None and not ctx.cache_no_read:
             t0 = time.perf_counter()
             candidates = await l2mod.query(
                 runtime.qdrant,
