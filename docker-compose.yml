@@ -5,6 +5,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         BAKE_EMBEDDINGS: "1"
+        HF_TOKEN: ${HF_TOKEN:-}
     image: cradle:local
     ports:
       - "8000:8000"
