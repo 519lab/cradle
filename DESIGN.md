@@ -564,7 +564,7 @@ class ChatRequest(BaseModel):
 
 `developer` role must **not** 422. Unknown top-level fields stay on the model (`model_extra`) and are forwarded upstream.
 
-**Upstream payload** = `req.model_dump(exclude_none=True)` after replacing `messages` with compressed messages (user fluff stripped; other roles identity). Extras included.
+**Upstream payload** = `req.model_dump(exclude_unset=True, exclude_none=True)` after replacing `messages` with compressed messages (user fluff stripped; other roles identity). Client-set extras included. `exclude_unset` keeps the pass-through honest — Cradle forwards only fields the client actually sent, so it never injects its own `ChatRequest` sampling defaults (`temperature`/`top_p`/penalties/`n`/`stream`) onto a backend with its own (llama.cpp/vLLM/Ollama); `exclude_none` keeps the result a strict subset of the old payload (an explicit optional `null` is not re-forwarded). The audit path (`run_audit`) uses the same dump. Cache identity is unaffected: `canonicalize` reads the defaulted attributes, so an omitted `temperature` and an explicit `1.0` still share a key (#26).
 
 Response: OpenAI `chat.completion` or SSE `chat.completion.chunk` ending with literal `data: [DONE]\n\n`.
 
