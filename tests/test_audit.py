@@ -160,15 +160,19 @@ def test_wrong_hit_is_caught_floored_and_self_healed(client: TestClient) -> None
     seed = _ask(client, "what is the capital of France")
     assert seed.headers["X-Cradle-Cache"] == "MISS" and "paris" in seed.text
 
+    # Snapshot BEFORE the L2 hit: an L2 hit makes no upstream call of its own, so
+    # the only new upstream call is the audit's. Capturing after the request races
+    # the background audit, which may already have run (esp. with a warm embed pool).
+    calls_before = _CALLS["upstream"]
+
     # Entity swap collides on cosine (constant prompt embedder): served WRONG.
     wrong = _ask(client, "what is the capital of Germany")
     assert wrong.headers["X-Cradle-Cache"] == "HIT-L2"
     assert wrong.headers["X-Cradle-Audit"] == "scheduled"
     assert "paris" in wrong.text
-    calls_at_serve = _CALLS["upstream"]
 
     _drain(client)
-    assert _CALLS["upstream"] == calls_at_serve + 1  # exactly one audit call
+    assert _CALLS["upstream"] == calls_before + 1  # exactly one audit call, no serve call
     after = _verdicts()
     assert after.get("disagree", 0) - before.get("disagree", 0) == 1
 
