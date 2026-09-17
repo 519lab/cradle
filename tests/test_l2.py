@@ -52,7 +52,7 @@ def test_cross_tenant_no_hit(tmp_path) -> None:
             now_unix=10,
         ),
     )
-    assert hit is None
+    assert hit == []
     client.close()
 
 
@@ -77,7 +77,7 @@ def test_cross_user_no_hit(tmp_path) -> None:
             now_unix=10,
         ),
     )
-    assert hit is None
+    assert hit == []
     client.close()
 
 
@@ -101,7 +101,7 @@ def test_sampling_fingerprint_mismatch(tmp_path) -> None:
             now_unix=10,
         ),
     )
-    assert hit is None
+    assert hit == []
     client.close()
 
 
@@ -125,6 +125,6 @@ def test_l2_hit_same_filters(tmp_path) -> None:
             now_unix=10,
         ),
     )
-    assert hit is not None
-    assert hit.score >= 0.90
+    assert len(hit) == 1
+    assert hit[0].score >= 0.90
     client.close()
