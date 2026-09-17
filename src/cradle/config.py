@@ -121,6 +121,12 @@ class L2Settings(BaseModel):
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_threshold: float = 4.0
     rerank_timeout_s: float = 2.0
+    # Retrieve the top-K L2 candidates above the cosine floor and serve the first
+    # that survives the guard + rerank, instead of only the single nearest
+    # neighbor. Raises hit rate without lowering the cosine floor: when the
+    # nearest neighbor is a near-miss the guard/rerank rejects, a true paraphrase
+    # at rank 2..K can still serve (enhancement #1). 1 = original behavior.
+    query_top_k: int = 5
     # Rerank execution device. "cpu" (default) keeps the thin CPU-only deploy and
     # the ~15-40ms/hit cost. "cuda" runs the cross-encoder on a GPU (~2-5ms, back
     # under the L2 p99 budget) but requires the onnxruntime-gpu extra

@@ -44,6 +44,12 @@ l2_rerank_fail_open = Counter(
     "L2 candidates served because rerank was unavailable or errored (fail-open)",
     registry=REGISTRY,
 )
+cache_write_skips = Counter(
+    "cradle_cache_write_skips_total",
+    "Responses NOT written to cache by the write-quality gate",
+    ["reason"],
+    registry=REGISTRY,
+)
 upstream_errors = Counter(
     "cradle_upstream_errors_total", "Upstream errors", ["status"], registry=REGISTRY
 )

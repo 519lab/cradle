@@ -56,29 +56,30 @@ def _must_filter(filt: L2Filter) -> Filter:
 
 def query_sync(
     client: QdrantClient, settings: Settings, vec: list[float], filt: L2Filter
-) -> L2Hit | None:
+) -> list[L2Hit]:
+    """Return up to `query_top_k` candidates above the cosine floor, best-first."""
+    k = max(1, settings.l2.query_top_k)
     result = client.query_points(
         collection_name=settings.l2.collection,
         query=vec,
         query_filter=_must_filter(filt),
-        limit=1,
+        limit=k,
         with_payload=True,
     )
-    points = result.points
-    if not points:
-        return None
-    point = points[0]
-    score = float(point.score)
-    if score < settings.l2.cosine_threshold:
-        return None
-    payload: dict[str, Any] = dict(point.payload or {})
-    record = CacheRecord.model_validate(payload)
-    return L2Hit(record=record, score=score)
+    hits: list[L2Hit] = []
+    for point in result.points:
+        score = float(point.score)
+        if score < settings.l2.cosine_threshold:
+            break  # points are score-desc; once below the floor, so is the rest
+        payload: dict[str, Any] = dict(point.payload or {})
+        record = CacheRecord.model_validate(payload)
+        hits.append(L2Hit(record=record, score=score))
+    return hits
 
 
 async def query(
     client: QdrantClient, settings: Settings, vec: list[float], filt: L2Filter
-) -> L2Hit | None:
+) -> list[L2Hit]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, query_sync, client, settings, vec, filt)
 
