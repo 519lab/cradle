@@ -52,7 +52,7 @@ from cradle.compress.engine import compress
 from cradle.config import UpstreamSettings
 from cradle.gateway.context import RequestContext
 from cradle.gateway.models import ChatRequest
-from cradle.gateway.writeback import record_from, writeback
+from cradle.gateway.writeback import cache_skip_reason, record_from, writeback
 from cradle.metrics import prometheus as m
 from cradle.reconstruct.merge import merge
 from cradle.reconstruct.templates import template_for
@@ -165,6 +165,15 @@ async def run_audit(
             runtime.http, target, payload, authorization=ctx.headers.get("authorization") or None
         )
         fresh = merge(fresh_completion, compressed.template)
+        # The same write-quality gate as the miss path (issue #24): an empty,
+        # truncated or refused fresh answer is not evidence about the served
+        # one and must never become the cached answer through self-heal.
+        skip = cache_skip_reason(fresh)
+        if skip is not None:
+            m.l2_audits.labels(verdict="error").inc()
+            m.cache_write_skips.labels(reason=skip).inc()
+            _append_log(runtime, {**row, "verdict": "error", "skip": skip})
+            return "error"
         judge, score, agree = await judge_answers(
             runtime, _content(fresh), _content(served.response)
         )
