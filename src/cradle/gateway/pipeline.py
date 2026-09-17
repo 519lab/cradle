@@ -31,7 +31,7 @@ from cradle.gateway.sse import (
 )
 from cradle.gateway.writeback import promote_l2_hit, record_from, writeback
 from cradle.metrics import prometheus as m
-from cradle.normalize import canonicalize, is_cacheable, l1_key, l2_eligible
+from cradle.normalize import cache_namespace, canonicalize, is_cacheable, l1_key, l2_eligible
 from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suffix
 from cradle.reconstruct.templates import template_for
 from cradle.tokens import count_chat_prompt
@@ -159,9 +159,12 @@ def _observe(ctx: RequestContext) -> None:
 
 
 async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -> JSONResponse | StreamingResponse:
-    canonical = canonicalize(req, ctx.principal, runtime.settings)
+    # Resolve the backend BEFORE canonicalizing so the resolved upstream folds
+    # into the cache identity (bug A): entries never cross backends.
+    ctx.upstream_name, upstream = resolve_upstream(runtime.settings, req.model)
+    ns = cache_namespace(ctx.upstream_name, upstream.base_url)
+    canonical = canonicalize(req, ctx.principal, runtime.settings, backend_namespace=ns)
     ctx.canonical = canonical
-    ctx.upstream_name, _ = resolve_upstream(runtime.settings, req.model)
     ctx.inbound_prompt_tokens = count_chat_prompt(req.messages, req.model)
     cacheable = is_cacheable(canonical, req, runtime.settings)
     if not cacheable:
@@ -190,6 +193,7 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                     tenant_id=canonical.tenant_id,
                     user_id=canonical.user_id,
                     model=canonical.model,
+                    backend_namespace=canonical.backend_namespace,
                     system_prompt_version=canonical.system_prompt_version,
                     pipeline_version=canonical.pipeline_version,
                     sampling_fingerprint=canonical.sampling_fingerprint,

@@ -24,6 +24,9 @@ class CanonicalRequest(BaseModel):
     tenant_id: str
     user_id: str
     model: str
+    # Hash of the resolved upstream (route target + base URL), so cache entries
+    # never cross backends (bug A). Empty when no backend was resolved.
+    backend_namespace: str = ""
     system_prompt_version: str
     pipeline_version: str
     temperature: float
@@ -55,6 +58,7 @@ class L2Filter(BaseModel):
     tenant_id: str
     user_id: str
     model: str
+    backend_namespace: str
     system_prompt_version: str
     pipeline_version: str
     sampling_fingerprint: str
@@ -67,6 +71,7 @@ class CacheRecord(BaseModel):
     tenant_id: str
     user_id: str
     model: str
+    backend_namespace: str = ""
     system_prompt_version: str
     pipeline_version: str
     prompt_hash: str

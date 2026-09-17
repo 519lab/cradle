@@ -34,6 +34,7 @@ def record_from(
         tenant_id=canonical.tenant_id,
         user_id=canonical.user_id,
         model=canonical.model,
+        backend_namespace=canonical.backend_namespace,
         system_prompt_version=canonical.system_prompt_version,
         pipeline_version=canonical.pipeline_version,
         prompt_hash=key,
