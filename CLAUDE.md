@@ -43,6 +43,8 @@ Per-request cache directives come from `X-Cradle-Cache-Control` (`no-store`, `no
 
 The volatility guard (`src/cradle/cache/volatility.py`, `cache.volatility_guard`) clamps the TTL of time-sensitive prompts to `cache.volatile_ttl_s`; it classifies user turns only, never system prompts, and an explicit `X-Cradle-Cache-TTL` overrides it.
 
+Verified L2 (`src/cradle/gateway/audit.py`, `l2.audit_rate`, default off): a sampled L2 hit is re-asked upstream in a background task after the response; the verdict updates `cradle_l2_audit_total{verdict}`, the entry's `audit_floor` (enforced in the pipeline candidate loop), `{data_dir}/audits.jsonl`, and on disagree writes the fresh answer back under the query's key. Tasks are tracked on `Runtime.audit_tasks` and drained at shutdown.
+
 L2 (Qdrant local) requires a **single** uvicorn worker. `WEB_CONCURRENCY` / `UVICORN_WORKERS` other than `1` is a startup error. Bypass streams (`stream+tools`, `n!=1`, logprobs) are raw SSE body passthrough (with an allowlist of upstream headers — `retry-after`, `x-ratelimit-*`, renamed request id — relayed); cacheable stream misses still wrap text completions. On a cacheable wrap-stream miss Cradle always requests `stream_options.include_usage` upstream (so real token usage is cached) even when the client did not; client-facing usage emission stays gated on the client's own flag. Upstream error bodies and `retry-after`/`x-ratelimit-*` headers are forwarded on errors too.
 
 ## Layout

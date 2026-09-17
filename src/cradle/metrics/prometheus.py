@@ -62,6 +62,20 @@ volatile_prompts = Counter(
     ["reason"],
     registry=REGISTRY,
 )
+l2_audits = Counter(
+    "cradle_l2_audit_total",
+    "Verified-L2 audits of served semantic hits, by verdict (agree/disagree/error)",
+    ["verdict"],
+    registry=REGISTRY,
+)
+l2_audit_answer_score = Histogram(
+    "cradle_l2_audit_answer_score",
+    "Judge score between the served cached answer and a fresh upstream answer "
+    "(rerank: cross-encoder logit; embed: cosine)",
+    ["judge"],
+    buckets=(-5, -2, 0, 0.5, 0.8, 0.9, 1.0, 2, 4, 6, 8, 10, 15),
+    registry=REGISTRY,
+)
 upstream_errors = Counter(
     "cradle_upstream_errors_total", "Upstream errors", ["status"], registry=REGISTRY
 )

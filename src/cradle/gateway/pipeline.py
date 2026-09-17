@@ -15,6 +15,7 @@ from cradle.cache.guard import guard_reason
 from cradle.cache.records import L2Filter, L2Hit
 from cradle.cache.volatility import volatile_reason_for
 from cradle.compress.engine import compress
+from cradle.gateway.audit import schedule_audit, should_audit
 from cradle.gateway.context import RequestContext
 from cradle.gateway.errors import openai_error
 from cradle.gateway.models import ChatMessage, ChatRequest
@@ -74,6 +75,8 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
         h["X-Cradle-Rerank"] = ctx.l2_rerank_note
     if ctx.volatile_reason is not None:
         h["X-Cradle-Volatile"] = ctx.volatile_reason
+    if ctx.audit_scheduled:
+        h["X-Cradle-Audit"] = "scheduled"
     return h
 
 
@@ -270,6 +273,13 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             # forces a full miss when a true paraphrase sits at rank 2..K.
             for hit in candidates:
                 ctx.l2_score = hit.score
+                # Stage 1b (verified L2): an entry that an audit already judged
+                # wrong at this similarity or higher refuses to serve.
+                floor = hit.record.audit_floor
+                if floor is not None and hit.score <= floor:
+                    ctx.l2_guard_reason = "audit-floor"
+                    m.l2_guard_rejects.labels(reason="audit-floor").inc()
+                    continue
                 # Stage 2 (issue #5): cheap precision guard.
                 reason = guard_reason(canonical.embed_text, hit.record.embed_text)
                 if reason is not None:
@@ -297,6 +307,18 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                         ctx.inbound_prompt_tokens,
                         ttl_s=_effective_ttl(runtime, ctx),
                     )
+                    if should_audit(runtime.settings.l2.audit_rate):
+                        ctx.audit_scheduled = True
+                        schedule_audit(
+                            runtime,
+                            req=req,
+                            ctx=ctx,
+                            canonical=canonical,
+                            query_vec=vec,
+                            hit=hit,
+                            served=rec,
+                            target=upstream,
+                        )
                     return _replay(req, ctx, rec)
 
     ctx.layer_hit = "miss"

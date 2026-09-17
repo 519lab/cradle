@@ -91,6 +91,19 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 
 Every candidate the pipeline examined is listed best-first, so a rejected near-miss shows up as `"guard":"reject:numbers"` or `"rerank":"reject:<score>"` with `"served":false`.
 
+## Verified L2 (audit sampling)
+
+Semantic hits are only as good as the thresholds behind them, and a wrong hit returns `200`. Set `l2.audit_rate` (e.g. `0.02`) and Cradle re-asks upstream for that fraction of served L2 hits **in the background**, judges the fresh answer against the served one with the cross-encoder it already loads (`l2.audit_judge: auto`; answer-embedding cosine is the weak fallback when rerank is off), and:
+
+- counts the verdict in `cradle_l2_audit_total{verdict}` — a measured false-hit rate on your real traffic;
+- teaches the served entry a floor: judged wrong at similarity `s`, it never serves at `≤ s` again (`X-Cradle-Guard: reject:audit-floor`);
+- self-heals: the fresh answer is cached under the querying prompt's own key;
+- appends a labeled row to `data/audits.jsonl` (`query_similarity`, `judge`, `answer_score`, `verdict`, keys; prompt text only with `audit_log_text: true`) — the calibration set for `cosine_threshold` / `rerank_threshold`.
+
+Verified live: "Which planet is farthest from the Sun?" hit the cached *closest*-planet answer (cosine 0.911, reranker 5.08 — the documented antonym gap). The audit judged the fresh answer against it at 0.53 (threshold 4.0), floored the entry at 0.911, and cached the correct answer under the new prompt; the next identical request served Neptune from L1.
+
+Sampled hits carry `X-Cradle-Audit: scheduled`. Audits are real upstream calls made with the client's forwarded credentials after its response has completed, so keep the rate small.
+
 ## Metrics
 
 Token savings ratio:
