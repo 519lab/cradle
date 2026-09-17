@@ -121,6 +121,19 @@ class L2Settings(BaseModel):
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_threshold: float = 4.0
     rerank_timeout_s: float = 2.0
+    # Rerank execution device. "cpu" (default) keeps the thin CPU-only deploy and
+    # the ~15-40ms/hit cost. "cuda" runs the cross-encoder on a GPU (~2-5ms, back
+    # under the L2 p99 budget) but requires the onnxruntime-gpu extra
+    # (cradle[rerank-gpu]) and a CUDA host. device_ids selects GPU(s) for cuda.
+    rerank_device: str = "cpu"
+    rerank_device_ids: list[int] | None = None
+
+    @field_validator("rerank_device")
+    @classmethod
+    def _check_rerank_device(cls, v: str) -> str:
+        if v not in {"cpu", "cuda"}:
+            raise ValueError("l2.rerank_device must be 'cpu' or 'cuda'")
+        return v
 
     @field_validator("cosine_threshold")
     @classmethod

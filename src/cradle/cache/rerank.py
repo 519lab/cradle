@@ -42,12 +42,24 @@ class FastEmbedReranker:
     per-pair synchronous call meant to run inside the embed thread pool.
     """
 
-    def __init__(self, model_name: str, cache_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: str | None = None,
+        *,
+        cuda: bool = False,
+        device_ids: list[int] | None = None,
+    ) -> None:
         from fastembed.rerank.cross_encoder import TextCrossEncoder
 
         kwargs: dict[str, object] = {"model_name": model_name}
         if cache_dir is not None:
             kwargs["cache_dir"] = cache_dir
+        if cuda:
+            # FastEmbed selects CUDAExecutionProvider; requires onnxruntime-gpu.
+            kwargs["cuda"] = True
+            if device_ids is not None:
+                kwargs["device_ids"] = device_ids
         self._ce = TextCrossEncoder(**kwargs)  # type: ignore[arg-type]
         self.model_name = model_name
 
