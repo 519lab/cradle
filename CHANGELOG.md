@@ -9,9 +9,11 @@
 - v1 Cradle pass-through API gateway: OpenAI-compatible `/v1/chat/completions` with L1 diskcache, L2 Qdrant local + FastEmbed, rule-based compression, prefix/suffix reconstruction, Prometheus metrics, and a fixture eval harness. No live LLM required for tests.
 - Runnable multi-stage Docker image (`uv sync --frozen`) and Compose stack. FastEmbed weights bake into `/opt/cradle/models/fastembed` so the `/data` volume does not hide them. Compose reaches a host-side upstream via `host.docker.internal`. CI builds `compose.ci.yml` and smokes `/healthz` + `/readyz`.
 - Docker image now also bakes the `bge-reranker-base` cross-encoder (`BAKE_RERANK=1`, default) into `/opt/cradle/models/fastembed`, so a fresh container is self-contained and does not download the ~1.1GB reranker at startup warm-up (needing HF network access). Set `BAKE_RERANK=0` to skip when rerank is disabled.
+- `HF_TOKEN` build arg (Dockerfile) + Compose passthrough, so the image bake steps can authenticate Hugging Face model downloads (gated or rate-limited pulls). Documented in `.env.example`; optional, empty = anonymous.
 
 ### Changed
 
+- Renamed `compose.yml` to `docker-compose.yml`.
 - Product copy: Cradle is a gateway clients point at, not a local companion app for a model runtime.
 - Default auth is intercept mode: no Cradle API key. Client `Authorization` is forwarded upstream; cache isolation is SHA-256 of that token. Optional `auth.keys` remains an allowlist.
 - Model glob `routes` send a request to a named OpenAI-compatible `upstreams` entry (OpenAI, xAI, llama.cpp, LiteLLM). Unmatched models use `upstream.base_url`.

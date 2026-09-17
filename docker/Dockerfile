@@ -13,6 +13,10 @@ ARG BAKE_EMBEDDINGS=1
 # container is self-contained and does not download it at startup warm-up. Set
 # BAKE_RERANK=0 to skip (e.g. rerank disabled) and keep the image small.
 ARG BAKE_RERANK=1
+# Hugging Face token, available to the bake steps below so gated or
+# rate-limited model downloads authenticate. Optional; unset = anonymous.
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 ENV FASTEMBED_CACHE_PATH=/opt/cradle/models/fastembed
 RUN mkdir -p /opt/cradle/models/fastembed \
     && if [ "$BAKE_EMBEDDINGS" = "1" ]; then \

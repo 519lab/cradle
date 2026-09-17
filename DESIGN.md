@@ -426,7 +426,7 @@ cradle/
       test_roundtrip_oracle.py
     fake_upstream.py
   docker/Dockerfile
-  compose.yml
+  docker-compose.yml
   compose.ci.yml
 ```
 
@@ -1265,7 +1265,7 @@ Per-process from settings, not per-request headers.
 
 Default path: `uv run python -m cradle`.
 
-`compose.yml`: proxy only, `CRADLE_SERVER__HOST: 0.0.0.0`, `CRADLE_DATA_DIR: /data`, bind `8000:8000`. **`metrics.require_auth` stays true.** No redis/qdrant/postgres. Compose default upstream is `http://host.docker.internal:8080/v1` (`extra_hosts: host-gateway`) so a host-side OpenAI-compatible server is reachable; override with `CRADLE_UPSTREAM_BASE_URL`. FastEmbed weights live at `FASTEMBED_CACHE_PATH` (`/opt/cradle/models/fastembed` in the image), **not** under `/data`, so the data volume does not hide baked models.
+`docker-compose.yml`: proxy only, `CRADLE_SERVER__HOST: 0.0.0.0`, `CRADLE_DATA_DIR: /data`, bind `8000:8000`. **`metrics.require_auth` stays true.** No redis/qdrant/postgres. Compose default upstream is `http://host.docker.internal:8080/v1` (`extra_hosts: host-gateway`) so a host-side OpenAI-compatible server is reachable; override with `CRADLE_UPSTREAM_BASE_URL`. FastEmbed weights live at `FASTEMBED_CACHE_PATH` (`/opt/cradle/models/fastembed` in the image), **not** under `/data`, so the data volume does not hide baked models.
 
 **Dockerfile must not `VOLUME /data`.** Multi-stage `uv sync --frozen`. `compose.ci.yml`: `tmpfs: ["/data"]`, `BAKE_EMBEDDINGS=0`, `CRADLE_FEATURES__L2=false`.
 
