@@ -145,7 +145,7 @@ flowchart TB
 
 Non-stream miss: compress → upstream JSON → wrap merge → writeback → respond.
 
-Stream miss (wrap-mode v1 — this is the contract). Generate a **local** `id` (`chatcmpl-{uuid4}`) and `created` (unix seconds) and use them on **every** outbound frame. Do **not** mix upstream ids.
+Stream miss (wrap-mode v1 — this is the contract). Generate a **local** `id` (`chatcmpl-{uuid4}`) and `created` (unix seconds) and use them on **every** outbound frame. Do **not** mix upstream ids. **Only `id`/`created` are synthesized** — other top-level upstream fields (`usage`, `system_fingerprint`, `service_tier`) are **forwarded**, not dropped and not faked (goal G4: don't drop upstream fields). Cradle always requests `stream_options.include_usage` upstream on the wrap path so the cached record holds real usage, but only re-emits the usage chunk to the client when the client itself asked for it.
 
 ```mermaid
 sequenceDiagram
@@ -575,12 +575,21 @@ X-Cradle-Cache: HIT-L1 | HIT-L2 | MISS | BYPASS
 X-Cradle-Pipeline: <pipeline_version>
 X-Cradle-Similarity: <float>          # L2 hits only
 X-Cradle-Inbound-Tokens: <int>
-X-Cradle-Upstream-Tokens: <int>
+X-Cradle-Upstream-Tokens: <int>       # omitted on a streaming MISS: the count is
+                                      # only known after the body streams, too late
+                                      # for a header — omit beats a false 0. Present
+                                      # on JSON responses and on streaming cache hits.
+X-Cradle-Upstream-Request-Id: <str>  # allowlisted upstream request id, renamed so it
+                                      # never clobbers X-Request-ID (error + bypass)
+Retry-After / X-RateLimit-*           # relayed from upstream on error + bypass
 Cache-Control: no-cache               # stream responses
 X-Accel-Buffering: no                 # stream responses
 ```
 
-Errors: `{"error":{"message","type","code"}}` with 401/413/502/504.
+Errors: `{"error":{"message","type","code"}}` with 401/413/502/504. Upstream error
+bodies pass through verbatim (real message/type/code), with `retry-after` /
+`x-ratelimit-*` relayed. Body-framing headers (`content-length`, `content-encoding`,
+`transfer-encoding`) are never forwarded — they describe Cradle's re-framed body.
 
 ### Auth
 

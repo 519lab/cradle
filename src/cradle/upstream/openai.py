@@ -13,11 +13,35 @@ from cradle.upstream.route import advertised_models
 log = logging.getLogger("cradle.upstream")
 
 
+# Response headers worth forwarding to the caller so client-side retry/backoff and
+# quota accounting keep working. Deliberately small: never forward hop-by-hop or
+# body-framing headers (content-length/content-encoding/transfer-encoding) — those
+# describe Cradle's re-encoded body, not the upstream's, and would corrupt it.
+_FORWARD_HEADER_PREFIXES = ("x-ratelimit-",)
+_FORWARD_HEADER_NAMES = frozenset({"retry-after"})
+# Upstream request id, renamed so it never clobbers Cradle's own X-Request-ID.
+_UPSTREAM_REQUEST_ID_HEADERS = ("x-request-id", "openai-request-id", "x-amzn-requestid")
+
+
+def forwardable_headers(headers: Any) -> dict[str, str]:
+    """Pick the allowlisted upstream response headers to relay to the caller."""
+    out: dict[str, str] = {}
+    for name, value in headers.items():
+        low = name.lower()
+        if low in _FORWARD_HEADER_NAMES or low.startswith(_FORWARD_HEADER_PREFIXES):
+            out[name] = value
+        elif low in _UPSTREAM_REQUEST_ID_HEADERS and "x-cradle-upstream-request-id" not in out:
+            out["x-cradle-upstream-request-id"] = value
+    return out
+
+
 class UpstreamError(Exception):
-    def __init__(self, status: int, body: Any) -> None:
+    def __init__(self, status: int, body: Any, headers: dict[str, str] | None = None) -> None:
         super().__init__(f"upstream {status}")
         self.status = status
         self.body = body
+        # Allowlisted upstream response headers (retry-after, x-ratelimit-*, request id).
+        self.headers = headers or {}
 
 
 def _url(upstream: UpstreamSettings, path: str) -> str:
@@ -67,7 +91,7 @@ async def chat(
             data = resp.json()
         except Exception:
             data = _error_body(resp.text)
-        raise UpstreamError(resp.status_code, data)
+        raise UpstreamError(resp.status_code, data, forwardable_headers(resp.headers))
     return resp.json()
 
 
@@ -95,8 +119,9 @@ async def start_chat_stream(
         ) from exc
     if resp.status_code >= 400:
         raw = (await resp.aread()).decode("utf-8", "replace")
+        headers = forwardable_headers(resp.headers)
         await resp.aclose()
-        raise UpstreamError(resp.status_code, _error_body(raw))
+        raise UpstreamError(resp.status_code, _error_body(raw), headers)
     return resp
 
 

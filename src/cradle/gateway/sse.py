@@ -46,15 +46,41 @@ def finish_frame(acc_id: str, created: int, model: str, reason: str) -> dict[str
     return obj
 
 
-def usage_frame(acc_id: str, created: int, model: str, usage: dict[str, int]) -> dict[str, Any]:
+def usage_frame(
+    acc_id: str,
+    created: int,
+    model: str,
+    usage: dict[str, int],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     obj = _base(acc_id, created, model)
     obj["choices"] = []
     obj["usage"] = usage
+    if extra:
+        obj.update(extra)
     return obj
 
 
-def error_frame(message: str) -> dict[str, Any]:
-    return {"error": {"message": message, "type": "server_error", "code": "upstream_error"}}
+# Top-level, provider-set completion fields that describe the response but are not
+# regeneration inputs. Forwarded verbatim on the wrap path (DESIGN.md wrap contract):
+# unlike `id`/`created`, which are deliberately local, these carry upstream truth the
+# caller may need (e.g. `system_fingerprint` for reproducibility audits).
+PASS_THROUGH_TOP_FIELDS = ("system_fingerprint", "service_tier")
+# `id`/`created` are deliberately local on the wrap path (DESIGN.md wrap contract);
+# they must never be forwarded, so they must never enter the pass-through allowlist.
+assert not ({"id", "created", "object"} & set(PASS_THROUGH_TOP_FIELDS))
+
+
+def error_frame(error: str | dict[str, Any]) -> dict[str, Any]:
+    """Build an SSE error frame.
+
+    A dict is an upstream error object (`{message,type,code,...}`) forwarded
+    verbatim so the caller sees the real upstream failure. A string is a
+    Cradle-originated message wrapped in the OpenAI error shape.
+    """
+    if isinstance(error, dict):
+        return {"error": error}
+    return {"error": {"message": error, "type": "server_error", "code": "upstream_error"}}
 
 
 @dataclass
@@ -68,8 +94,12 @@ class StreamAccumulator:
     usage: dict[str, int] | None = None
     saw_done: bool = False
     error: bool = False
+    error_payload: dict[str, Any] | None = None
     tool_call_seen: bool = False
     client_connected: bool = True
+    # Provider-set top-level fields (system_fingerprint, service_tier) seen on any
+    # chunk, forwarded to the caller and stored so cached replays match live streams.
+    extra_top: dict[str, Any] = field(default_factory=dict)
 
     @property
     def content(self) -> str:
@@ -94,7 +124,12 @@ def parse_and_accumulate(line: str, acc: StreamAccumulator) -> str | None:
         return None
     if isinstance(obj, dict) and obj.get("error"):
         acc.error = True
+        err = obj["error"]
+        acc.error_payload = err if isinstance(err, dict) else {"message": str(err)}
         return None
+    for f in PASS_THROUGH_TOP_FIELDS:
+        if obj.get(f) is not None:
+            acc.extra_top[f] = obj[f]
     choices = obj.get("choices") or []
     if not choices:
         if isinstance(obj.get("usage"), dict):
@@ -125,11 +160,12 @@ def synthesize_sse(record: CacheRecord, *, include_usage: bool) -> Iterator[byte
     message = (choices[0] or {}).get("message") or {}
     body = message.get("content") or ""
     finish = (choices[0] or {}).get("finish_reason") or "stop"
+    extra = {f: resp[f] for f in PASS_THROUGH_TOP_FIELDS if resp.get(f) is not None}
     yield encode_chunk(role_frame(rec_id, created, model))
     for i in range(0, len(body), 16):
         yield encode_chunk(content_frame(rec_id, created, model, body[i : i + 16]))
     yield encode_chunk(finish_frame(rec_id, created, model, finish))
     usage = resp.get("usage")
-    if include_usage and isinstance(usage, dict):
-        yield encode_chunk(usage_frame(rec_id, created, model, usage))
+    if include_usage and isinstance(usage, dict) and usage:
+        yield encode_chunk(usage_frame(rec_id, created, model, usage, extra or None))
     yield encode_done()

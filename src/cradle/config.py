@@ -190,7 +190,10 @@ class Settings(BaseSettings):
 
     server: ServerSettings = Field(default_factory=ServerSettings)
     data_dir: Path = Path("./data")
-    pipeline_version: str = "v1"
+    # Bumped v1→v2 with the wrap-stream usage fix: pre-fix wrap-stream entries stored
+    # empty usage and must not be replayed. pipeline_version folds into the L1 key and
+    # the L2 filter, so the bump makes those entries miss and age out on TTL.
+    pipeline_version: str = "v2"
     auth: AuthSettings = Field(default_factory=AuthSettings)
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     upstreams: dict[str, UpstreamSettings] = Field(default_factory=dict)
