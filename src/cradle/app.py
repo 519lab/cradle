@@ -69,7 +69,12 @@ def _build_reranker(settings: Settings, override: object | None):
     from cradle.embeddings.fastembed import resolve_cache_dir
 
     cache_dir = resolve_cache_dir(settings.data_dir)
-    return FastEmbedReranker(model_name=settings.l2.rerank_model, cache_dir=str(cache_dir))
+    return FastEmbedReranker(
+        model_name=settings.l2.rerank_model,
+        cache_dir=str(cache_dir),
+        cuda=settings.l2.rerank_device == "cuda",
+        device_ids=settings.l2.rerank_device_ids,
+    )
 
 
 def create_app(

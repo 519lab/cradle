@@ -47,6 +47,7 @@ features:
   compression: true
   structure: false
   l2: true
+  l2_rerank: true   # cross-encoder rerank of L2 hits; closes entity-swap FPs
   reconstruction: true
   local_1b: false
 
@@ -67,6 +68,16 @@ l2:
   dim: 384
   onnx_threads: null
   points_warn: 20000
+  # Cross-encoder rerank (features.l2_rerank). Threshold is a raw logit from
+  # rerank_model; on bge-reranker-base, entity swaps score < ~3.5 and genuine
+  # paraphrases > ~4.8 (role-framed input), so 4.0 rejects entity swaps while
+  # keeping real hits. rerank_device cpu (default, ~15-40ms/hit) or cuda
+  # (~2-5ms, needs cradle[rerank-gpu] + a CUDA host).
+  rerank_model: BAAI/bge-reranker-base
+  rerank_threshold: 4.0
+  rerank_timeout_s: 2.0
+  rerank_device: cpu
+  rerank_device_ids: null
 
 compress:
   structure_min_chars: 400
