@@ -16,6 +16,7 @@
 
 ### Changed
 
+- **`/v1/models` reflects the real upstream model in single-backend deploys.** When no named `upstreams`/`routes` are configured (fallback-only, the default), Cradle now proxies `/v1/models` to the upstream and returns what it actually serves — instead of the static `upstream.models` placeholder. So a client (e.g. Open WebUI) shows the real model in its picker with no config. With named routes present, the static advertised list is kept (proxying one backend would be ambiguous). The explicit `upstream.models_passthrough` flag still forces passthrough. If the upstream is unreachable, `/v1/models` falls back to the static list rather than erroring (clients poll it on every connection check).
 - Renamed `compose.yml` to `docker-compose.yml`.
 - `config/cradle.yaml` is now gitignored with `config/cradle.yaml.example` as the tracked template — copy the example to the real filename before running, so local config edits no longer conflict on every `git pull`.
 - Product copy: Cradle is a gateway clients point at, not a local companion app for a model runtime.
