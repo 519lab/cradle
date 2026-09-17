@@ -57,6 +57,12 @@ cache:
   evict_old_pipeline: true
   purge_interval_s: 300
   l1_size_limit_bytes: 1000000000
+  # Volatility guard: prompts asking about time-sensitive things ("latest
+  # version", "current price", "today", weather, news) are stored with
+  # volatile_ttl_s instead of ttl_s. 0 = never store them. A client's own
+  # X-Cradle-Cache-TTL always wins. Reason is visible as X-Cradle-Volatile.
+  volatility_guard: true
+  volatile_ttl_s: 300
 
 l2:
   mode: local

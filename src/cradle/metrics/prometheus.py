@@ -56,6 +56,12 @@ cache_probes = Counter(
     ["cache"],
     registry=REGISTRY,
 )
+volatile_prompts = Counter(
+    "cradle_volatile_prompts_total",
+    "Prompts the volatility guard classified time-sensitive (short TTL applied)",
+    ["reason"],
+    registry=REGISTRY,
+)
 upstream_errors = Counter(
     "cradle_upstream_errors_total", "Upstream errors", ["status"], registry=REGISTRY
 )

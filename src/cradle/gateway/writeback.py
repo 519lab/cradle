@@ -88,9 +88,16 @@ async def promote_l2_hit(
     canonical: CanonicalRequest,
     hit_record: CacheRecord,
     inbound: int,
+    *,
+    ttl_s: int | None = None,
 ) -> CacheRecord:
+    """Copy an L2 hit into L1 under the querying prompt's exact key.
+
+    ``ttl_s`` is the effective TTL for *this* request (client override or
+    volatility guard); it defaults to the configured TTL.
+    """
     now = int(time.time())
-    ttl = runtime.settings.cache.ttl_s
+    ttl = runtime.settings.cache.ttl_s if ttl_s is None else ttl_s
     key = l1_key(canonical)
     promoted = hit_record.model_copy(
         update={
@@ -103,6 +110,6 @@ async def promote_l2_hit(
             "upstream_prompt_tokens": 0,
         }
     )
-    if runtime.l1 is not None:
+    if runtime.l1 is not None and ttl > 0:
         await l1mod.set(runtime.l1, key, promoted, ttl, runtime.settings.pipeline_version)
     return promoted
