@@ -9,11 +9,19 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 ARG BAKE_EMBEDDINGS=1
+# Bake the L2 cross-encoder reranker (features.l2_rerank, ~1.1GB) so a fresh
+# container is self-contained and does not download it at startup warm-up. Set
+# BAKE_RERANK=0 to skip (e.g. rerank disabled) and keep the image small.
+ARG BAKE_RERANK=1
 ENV FASTEMBED_CACHE_PATH=/opt/cradle/models/fastembed
 RUN mkdir -p /opt/cradle/models/fastembed \
     && if [ "$BAKE_EMBEDDINGS" = "1" ]; then \
          /app/.venv/bin/python -c \
            "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/opt/cradle/models/fastembed')"; \
+       fi \
+    && if [ "$BAKE_RERANK" = "1" ]; then \
+         /app/.venv/bin/python -c \
+           "from fastembed.rerank.cross_encoder import TextCrossEncoder; TextCrossEncoder(model_name='BAAI/bge-reranker-base', cache_dir='/opt/cradle/models/fastembed')"; \
        fi
 
 FROM python:3.12-slim-bookworm
