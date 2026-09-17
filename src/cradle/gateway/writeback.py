@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from cradle.cache import l1 as l1mod
 from cradle.cache import l2 as l2mod
 from cradle.cache.records import CacheRecord, CanonicalRequest
+from cradle.metrics import prometheus as m
 from cradle.normalize import l1_key
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ def record_from(
         pipeline_version=canonical.pipeline_version,
         prompt_hash=key,
         embed_text_hash=_embed_hash(canonical.embed_text),
+        embed_text=canonical.embed_text,
         response=response,
         created_at=now,
         expires_at=now + ttl_s,
@@ -74,6 +76,10 @@ async def writeback(
         )
     if vec is not None and runtime.qdrant is not None and runtime.settings.features.l2:
         await l2mod.upsert(runtime.qdrant, runtime.settings, vec, record)
+        # Keep the l2_points gauge fresh on write (issue #4). This is an
+        # approximate bump: an upsert that updates an existing point over-counts
+        # by one until the purge loop's count_points() reconciles the true value.
+        m.l2_points.inc()
 
 
 async def promote_l2_hit(

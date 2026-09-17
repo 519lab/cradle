@@ -28,6 +28,12 @@ over_compression_blocks = Counter(
     ["reason"],
     registry=REGISTRY,
 )
+l2_guard_rejects = Counter(
+    "cradle_l2_guard_rejects_total",
+    "L2 candidates rejected by the precision guard after the cosine gate",
+    ["reason"],
+    registry=REGISTRY,
+)
 upstream_errors = Counter(
     "cradle_upstream_errors_total", "Upstream errors", ["status"], registry=REGISTRY
 )

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from cradle.cache import l1 as l1mod
 from cradle.cache import l2 as l2mod
+from cradle.cache.guard import guard_reason
 from cradle.cache.records import L2Filter
 from cradle.compress.engine import compress
 from cradle.gateway.context import RequestContext
@@ -60,6 +61,8 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
     }
     if ctx.l2_score is not None:
         h["X-Cradle-Similarity"] = f"{ctx.l2_score:.6f}"
+    if ctx.l2_guard_reason is not None:
+        h["X-Cradle-Guard"] = f"reject:{ctx.l2_guard_reason}"
     return h
 
 
@@ -166,11 +169,23 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             )
             ctx.t_l2_s = time.perf_counter() - t0
             if hit is not None:
-                ctx.layer_hit = "l2"
-                ctx.l2_score = hit.score
-                ctx.upstream_prompt_tokens = 0
-                rec = await promote_l2_hit(runtime, canonical, hit.record, ctx.inbound_prompt_tokens)
-                return _replay(req, ctx, rec)
+                # Precision guard (issue #5): the cosine gate has recall but no
+                # precision. Reject a candidate whose numbers/negation differ
+                # from the query and fall through to a real upstream miss, which
+                # also writes back a correct entry.
+                reason = guard_reason(canonical.embed_text, hit.record.embed_text)
+                if reason is not None:
+                    ctx.l2_guard_reason = reason
+                    ctx.l2_score = hit.score
+                    m.l2_guard_rejects.labels(reason=reason).inc()
+                else:
+                    ctx.layer_hit = "l2"
+                    ctx.l2_score = hit.score
+                    ctx.upstream_prompt_tokens = 0
+                    rec = await promote_l2_hit(
+                        runtime, canonical, hit.record, ctx.inbound_prompt_tokens
+                    )
+                    return _replay(req, ctx, rec)
 
     ctx.layer_hit = "miss"
     return await _miss(runtime, req, ctx, vec=vec)
