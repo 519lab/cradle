@@ -35,6 +35,11 @@ async def readyz(request: Request) -> Response:
         ok = False
     if rt.settings.features.l2 and not (rt.l2_ready and rt.embedder_ready):
         ok = False
+    # When rerank is enabled it is a correctness control (issue #5): if it failed
+    # to load, L2 would serve entity-swap near-misses unverified. Report not-ready
+    # rather than take traffic in that silently-degraded state.
+    if rt.settings.features.l2 and rt.settings.features.l2_rerank and not rt.reranker_ready:
+        ok = False
     if ok:
         return Response(content='{"status":"ready"}', media_type="application/json")
     return Response(content='{"status":"not_ready"}', media_type="application/json", status_code=503)

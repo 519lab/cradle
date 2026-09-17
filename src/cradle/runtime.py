@@ -26,3 +26,4 @@ class Runtime:
     l1_ready: bool = False
     l2_ready: bool = False
     embedder_ready: bool = False
+    reranker_ready: bool = False

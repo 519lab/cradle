@@ -122,15 +122,18 @@ def create_app(
         # After the cheap startup checks so a misconfigured worker count fails
         # fast without paying the reranker model load.
         resolved_reranker = _build_reranker(settings, reranker)
+        reranker_ready = False
         if resolved_reranker is not None:
             # Warm the model once so the first request does not pay init cost. A
-            # warm-up failure must not crash startup: the rerank stage fails open
-            # per-request anyway, so a broken reranker degrades to guard-only L2.
+            # warm-up failure must not crash startup, but it does mark the
+            # reranker not-ready so /readyz reports the degraded state instead of
+            # silently serving L2 with the #5 protection off.
             try:
                 resolved_reranker.score("ok", "ok")
+                reranker_ready = True
                 m.ready_gauge.labels(component="reranker").set(1)
             except Exception:
-                log.exception("reranker warm-up failed; continuing with fail-open rerank")
+                log.exception("reranker warm-up failed; L2 rerank is degraded")
                 m.ready_gauge.labels(component="reranker").set(0)
 
         embed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cradle-embed")
@@ -147,6 +150,7 @@ def create_app(
             l1_ready=l1_ready,
             l2_ready=l2_ready,
             embedder_ready=embedder_ready,
+            reranker_ready=reranker_ready,
         )
         app.state.runtime = runtime
 
