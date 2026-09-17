@@ -29,6 +29,8 @@ Optional real-BGE pair eval (downloads the ONNX model):
 uv run pytest -m embed
 ```
 
+Property-based tests (`tests/test_properties.py`, Hypothesis) run in the default suite at 200 examples each; `CRADLE_HYPOTHESIS_MAX=5000 uv run pytest tests/test_properties.py` for a deeper local pass.
+
 Noisy CI latency gate:
 
 ```bash
