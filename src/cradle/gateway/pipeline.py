@@ -35,7 +35,12 @@ from cradle.normalize import cache_namespace, canonicalize, is_cacheable, l1_key
 from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suffix
 from cradle.reconstruct.templates import template_for
 from cradle.tokens import count_chat_prompt
-from cradle.upstream.openai import UpstreamError, chat, start_chat_stream
+from cradle.upstream.openai import (
+    UpstreamError,
+    chat,
+    forwardable_headers,
+    start_chat_stream,
+)
 from cradle.upstream.route import resolve_upstream
 
 if TYPE_CHECKING:
@@ -86,9 +91,12 @@ def _client_auth(ctx: RequestContext) -> str | None:
 def _upstream_error_response(ctx: RequestContext, exc: UpstreamError) -> JSONResponse:
     m.upstream_errors.labels(status=str(exc.status)).inc()
     status = 502 if exc.status >= 500 else exc.status
+    # Relay upstream retry/quota headers (retry-after, x-ratelimit-*, request id) so a
+    # client's backoff on a 429/503 still works even though Cradle re-frames the body.
+    headers = {**_headers(ctx), **exc.headers}
     if isinstance(exc.body, dict):
-        return JSONResponse(exc.body, status_code=status, headers=_headers(ctx))
-    return openai_error(str(exc.body), "server_error", "upstream_error", status)
+        return JSONResponse(exc.body, status_code=status, headers=headers)
+    return openai_error(str(exc.body), "server_error", "upstream_error", status, headers)
 
 
 async def _maybe_embed(runtime: Runtime, text: str, ctx: RequestContext) -> list[float] | None:
@@ -366,6 +374,9 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
     ctx.t_upstream_s = time.perf_counter() - t0
     headers = _sse_headers(ctx)
     if ctx.layer_hit == "bypass":
+        # Bypass tees the body verbatim; also relay the allowlisted upstream headers
+        # (x-ratelimit-*, request id) so a passthrough response carries quota state.
+        headers.update(forwardable_headers(resp.headers))
         return StreamingResponse(
             _passthrough_bytes(resp, ctx),
             media_type="text/event-stream",

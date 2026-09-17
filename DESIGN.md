@@ -575,12 +575,21 @@ X-Cradle-Cache: HIT-L1 | HIT-L2 | MISS | BYPASS
 X-Cradle-Pipeline: <pipeline_version>
 X-Cradle-Similarity: <float>          # L2 hits only
 X-Cradle-Inbound-Tokens: <int>
-X-Cradle-Upstream-Tokens: <int>
+X-Cradle-Upstream-Tokens: <int>       # omitted on a streaming MISS: the count is
+                                      # only known after the body streams, too late
+                                      # for a header — omit beats a false 0. Present
+                                      # on JSON responses and on streaming cache hits.
+X-Cradle-Upstream-Request-Id: <str>  # allowlisted upstream request id, renamed so it
+                                      # never clobbers X-Request-ID (error + bypass)
+Retry-After / X-RateLimit-*           # relayed from upstream on error + bypass
 Cache-Control: no-cache               # stream responses
 X-Accel-Buffering: no                 # stream responses
 ```
 
-Errors: `{"error":{"message","type","code"}}` with 401/413/502/504.
+Errors: `{"error":{"message","type","code"}}` with 401/413/502/504. Upstream error
+bodies pass through verbatim (real message/type/code), with `retry-after` /
+`x-ratelimit-*` relayed. Body-framing headers (`content-length`, `content-encoding`,
+`transfer-encoding`) are never forwarded — they describe Cradle's re-framed body.
 
 ### Auth
 

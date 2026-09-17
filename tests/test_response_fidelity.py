@@ -140,3 +140,49 @@ def test_bypass_stream_payload_untouched(
     # bypass tools stream must not, proving the payload reached upstream unmodified.
     assert _usage_frames(_sse_objects(r.content)) == []
     assert b"tool_calls" in r.content
+
+
+def test_error_forwards_ratelimit_headers(
+    client: TestClient, auth_header: dict[str, str]
+) -> None:
+    """A 429 from upstream relays retry-after / x-ratelimit-* / a renamed request id,
+    but NOT body-framing headers (content-length), which would corrupt the response."""
+    r = client.post(
+        "/v1/chat/completions",
+        headers=auth_header,
+        json={"model": "fail-429", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 429
+    assert r.json()["error"]["code"] == "rate_limited"
+    assert r.headers["retry-after"] == "30"
+    assert r.headers["x-ratelimit-remaining-requests"] == "0"
+    # Upstream request id is renamed so it never clobbers Cradle's own X-Request-ID:
+    # the upstream value lands under x-cradle-upstream-request-id, while Cradle's own
+    # X-Request-ID keeps its own (different) value.
+    assert r.headers["x-cradle-upstream-request-id"] == "req_upstream_abc"
+    assert r.headers["x-request-id"] != "req_upstream_abc"
+    # The upstream's content-length describes ITS body, not Cradle's re-framed one.
+    # httpx recomputes content-length for the actual body, so it must equal the real
+    # payload size, never the forwarded bogus "999".
+    assert r.headers["content-length"] == str(len(r.content))
+    assert r.headers["content-length"] != "999"
+
+
+def test_bypass_stream_forwards_ratelimit_headers(
+    client: TestClient, auth_header: dict[str, str]
+) -> None:
+    """A 200 bypass passthrough carries the allowlisted upstream quota headers."""
+    r = client.post(
+        "/v1/chat/completions",
+        headers=auth_header,
+        json={
+            "model": "gpt-4o-mini",
+            "stream": True,
+            "tools": [{"type": "function", "function": {"name": "x", "parameters": {}}}],
+            "messages": [{"role": "user", "content": "bypass-headers-1"}],
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["X-Cradle-Cache"] == "BYPASS"
+    assert r.headers["x-ratelimit-remaining-requests"] == "5"
+    assert r.headers["x-cradle-upstream-request-id"] == "req_bypass_1"

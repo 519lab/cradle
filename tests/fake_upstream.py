@@ -28,6 +28,17 @@ async def completions(request: Request):
             {"error": {"message": "nope", "type": "invalid_request_error", "code": "invalid_api_key"}},
             status_code=401,
         )
+    if model == "fail-429":
+        return JSONResponse(
+            {"error": {"message": "slow down", "type": "rate_limit_error", "code": "rate_limited"}},
+            status_code=429,
+            headers={
+                "retry-after": "30",
+                "x-ratelimit-remaining-requests": "0",
+                "x-request-id": "req_upstream_abc",
+                "content-length": "999",  # must NOT be forwarded (would corrupt the body)
+            },
+        )
     if body.get("n", 1) == 2 and not body.get("stream"):
         text = _reply_from(body)
         return JSONResponse(
@@ -142,7 +153,10 @@ async def completions(request: Request):
                 yield f"data: {json.dumps(usage_chunk)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        stream_headers = {"x-ratelimit-remaining-requests": "5", "x-request-id": "req_bypass_1"}
+        return StreamingResponse(
+            gen(), media_type="text/event-stream", headers=stream_headers
+        )
     return JSONResponse(
         {
             "id": "chatcmpl-fake",
