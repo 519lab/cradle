@@ -328,8 +328,8 @@ incident or a change to compression/reconstruction behavior. Prefer it over wipi
 
 > Note: the `cache.evict_old_pipeline` config knob (default `true`) is currently **not
 > wired to anything** — nothing in the code reads it, so it does not actively delete
-> old-version entries. The reversibility above holds regardless of its value. (Flagged as a
-> dead config field to remove or implement; tracked separately from this runbook.)
+> old-version entries. The reversibility above holds regardless of its value. (Dead config
+> field to remove or implement — tracked in #27.)
 
 ### 7.3 Destructive resets — **Greg runs these, not Claude/automation**
 
