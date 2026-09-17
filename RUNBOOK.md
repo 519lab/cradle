@@ -6,10 +6,15 @@ explanation and quickstart** in `README.md`, **decisions** in `DECISIONS.md` —
 file cross-links them and does not restate them. When a fact here and a fact there
 disagree, the code wins; fix both.
 
-*§2 (health/readiness, POST headers, `/v1/models`), §4 (metric names), and §6.1 (probe)
-verified against the live container `192.168.50.30:8000` (single llama.cpp upstream serving
-`unsloth/Qwen3.8-27B-GGUF`) on 2026-09-17. §1, §3, §5, §7 derived from the code at that
-date — drive them against a running instance before relying on them and update this line.*
+*Verified against the live container `192.168.50.30:8000` (single llama.cpp upstream serving
+`unsloth/Qwen3.8-27B-GGUF`, merged `develop`, pipeline v2) on 2026-09-17: §1.1 (compose
+deploy — a `docker compose up --build` brought this build up healthy), §2 (health/readiness,
+POST headers, `/v1/models` passthrough), §4 (metric names + live counters), §6.1 (probe),
+and the streaming usage round-trip (§2/§7 wrap path). §3 (worker guard, 20k ceiling), §5
+(induced-failure rows), and §7's recovery levers remain code-derived — a healthy rebuild
+does not exercise them, and the destructive resets must not be run against a live instance
+to "verify" them. Drive those against a throwaway instance before relying on them, and
+update this line.*
 
 > **Keeping this current is not optional.** Any change touching a config key, an env
 > var, a metric name, a health/readiness condition, a capacity limit, or a per-request
