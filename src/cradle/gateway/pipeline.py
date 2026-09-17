@@ -293,6 +293,16 @@ async def _miss(
     _name, target = resolve_upstream(runtime.settings, req.model)
     ctx.upstream_name = _name
     if req.stream:
+        # On the wrap path Cradle rebuilds the outbound stream and caches the result,
+        # so it must know the real token usage even when the client did not request it
+        # (otherwise the record stores empty usage and every later include_usage hit
+        # replays {}). Ask upstream for the usage chunk. Never touch the bypass payload:
+        # that path is a byte-exact passthrough and must stay verbatim.
+        if ctx.layer_hit != "bypass":
+            payload["stream_options"] = {
+                **(payload.get("stream_options") or {}),
+                "include_usage": True,
+            }
         return await _miss_stream(runtime, req, ctx, vec, compressed, payload, target)
     return await _miss_json(runtime, req, ctx, vec, compressed, payload, target)
 
@@ -337,6 +347,11 @@ def _sse_headers(ctx: RequestContext) -> dict[str, str]:
     headers = _headers(ctx)
     headers["Cache-Control"] = "no-cache"
     headers["X-Accel-Buffering"] = "no"
+    # On a streaming miss the real upstream token count is only known after the body
+    # has streamed — too late for a response header. Drop it rather than report a
+    # false 0. (It lands in the cache record and the cradle_upstream_prompt_tokens
+    # metric; a later cache-hit replay reports the true value.)
+    headers.pop("X-Cradle-Upstream-Tokens", None)
     return headers
 
 
@@ -393,7 +408,7 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
                     yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, prefix))
             piece = parse_and_accumulate(line, acc)
             if acc.error:
-                yield encode_chunk(error_frame("upstream error"))
+                yield encode_chunk(error_frame(acc.error_payload or "upstream error"))
                 yield encode_done()
                 return
             if acc.tool_call_seen:
@@ -410,8 +425,14 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
         if suffix:
             yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, suffix))
         yield encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason))
+        # The client only sees a usage chunk when it asked for one (OpenAI semantics),
+        # even though Cradle always requests usage upstream on the wrap path.
         if _include_usage(req) and acc.usage:
-            yield encode_chunk(usage_frame(outbound_id, outbound_created, req.model, acc.usage))
+            yield encode_chunk(
+                usage_frame(
+                    outbound_id, outbound_created, req.model, acc.usage, acc.extra_top or None
+                )
+            )
         yield encode_done()
         usage = acc.usage or {}
         ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
@@ -429,6 +450,9 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
                 }
             ],
             "usage": acc.usage or {},
+            # Provider metadata (system_fingerprint, service_tier) so a cached replay
+            # carries the same top-level fields a live wrap-stream response does.
+            **acc.extra_top,
         }
         ttl = _effective_ttl(runtime, ctx)
         skip = _response_cache_skip_reason(completion)

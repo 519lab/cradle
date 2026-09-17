@@ -145,7 +145,7 @@ flowchart TB
 
 Non-stream miss: compress → upstream JSON → wrap merge → writeback → respond.
 
-Stream miss (wrap-mode v1 — this is the contract). Generate a **local** `id` (`chatcmpl-{uuid4}`) and `created` (unix seconds) and use them on **every** outbound frame. Do **not** mix upstream ids.
+Stream miss (wrap-mode v1 — this is the contract). Generate a **local** `id` (`chatcmpl-{uuid4}`) and `created` (unix seconds) and use them on **every** outbound frame. Do **not** mix upstream ids. **Only `id`/`created` are synthesized** — other top-level upstream fields (`usage`, `system_fingerprint`, `service_tier`) are **forwarded**, not dropped and not faked (goal G4: don't drop upstream fields). Cradle always requests `stream_options.include_usage` upstream on the wrap path so the cached record holds real usage, but only re-emits the usage chunk to the client when the client itself asked for it.
 
 ```mermaid
 sequenceDiagram

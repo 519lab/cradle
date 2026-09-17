@@ -45,7 +45,13 @@ async def completions(request: Request):
         )
     text = _reply_from(body)
     if body.get("stream"):
+        want_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+
         async def gen():
+            if model == "err-stream":
+                # Mid-stream upstream error object (real provider message/type/code).
+                yield 'data: {"error":{"message":"upstream boom","type":"rate_limit_error","code":"rate_limited"}}\n\n'
+                return
             if model == "trunc-stream":
                 chunk = {
                     "id": "chatcmpl-fake",
@@ -103,6 +109,8 @@ async def completions(request: Request):
                 "object": "chat.completion.chunk",
                 "created": 1,
                 "model": model,
+                "system_fingerprint": "fp_fake_123",
+                "service_tier": "default",
                 "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             }
             yield f"data: {json.dumps(chunk)}\n\n"
@@ -118,6 +126,20 @@ async def completions(request: Request):
                     ],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
+            if want_usage:
+                # OpenAI emits a final usage-only chunk (empty choices) when
+                # stream_options.include_usage is set.
+                usage_chunk = {
+                    "id": "chatcmpl-fake",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": model,
+                    "system_fingerprint": "fp_fake_123",
+                    "service_tier": "default",
+                    "choices": [],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                }
+                yield f"data: {json.dumps(usage_chunk)}\n\n"
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")

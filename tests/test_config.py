@@ -15,7 +15,7 @@ def test_yaml_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.server.port == 8000
     assert s.upstream.base_url.endswith(":8080/v1")
     assert s.features.structure is False
-    assert s.pipeline_version == "v1"
+    assert s.pipeline_version == "v2"
     assert s.auth.keys == []
     assert s.upstream.pass_through_client_auth is True
 
