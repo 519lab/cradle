@@ -12,11 +12,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from cradle.cache import l1 as l1mod
 from cradle.cache import l2 as l2mod
 from cradle.cache.guard import guard_reason
-from cradle.cache.records import L2Filter
+from cradle.cache.records import L2Filter, L2Hit
 from cradle.compress.engine import compress
 from cradle.gateway.context import RequestContext
 from cradle.gateway.errors import openai_error
 from cradle.gateway.models import ChatMessage, ChatRequest
+from cradle.gateway.probe import candidate_entry, probe_response
 from cradle.gateway.sse import (
     StreamAccumulator,
     content_frame,
@@ -204,20 +205,26 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
     cacheable = is_cacheable(canonical, req, runtime.settings)
     if not cacheable:
         ctx.layer_hit = "bypass"
+        if ctx.cache_probe:
+            return _probe(ctx, l1_key=None, l2_eligible=False)
         return await _miss(runtime, req, ctx, vec=None)
 
+    key = l1_key(canonical)
     # Per-request no-cache/refresh (enhancement #2): skip the read, still write.
     if runtime.l1 is not None and not ctx.cache_no_read:
         t0 = time.perf_counter()
-        rec = await l1mod.get(runtime.l1, l1_key(canonical))
+        rec = await l1mod.get(runtime.l1, key)
         ctx.t_l1_s = time.perf_counter() - t0
         if rec is not None:
             ctx.layer_hit = "l1"
             ctx.upstream_prompt_tokens = 0
+            if ctx.cache_probe:
+                return _probe(ctx, l1_key=key, l2_eligible=False)
             return _replay(req, ctx, rec)
 
     vec: list[float] | None = None
-    if l2_eligible(canonical, req, runtime.settings) and runtime.qdrant is not None:
+    eligible = l2_eligible(canonical, req, runtime.settings) and runtime.qdrant is not None
+    if eligible:
         # Embed even on no-cache/refresh: only the L2 *read* is skipped. The
         # writeback needs the vector to replace the stale L2 point, otherwise a
         # refresh updates L1 alone and paraphrases keep replaying the old answer.
@@ -250,6 +257,7 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                 if reason is not None:
                     ctx.l2_guard_reason = reason
                     m.l2_guard_rejects.labels(reason=reason).inc()
+                    _note_candidate(ctx, hit, guard=reason, rerank=None, served=False)
                     continue
                 # Stage 3: cross-encoder rerank for entity swaps the guard cannot
                 # see. Fail-open: an unavailable reranker still serves.
@@ -257,17 +265,40 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                     runtime, canonical.embed_text, hit.record.embed_text
                 )
                 ctx.l2_rerank_note = note
+                _note_candidate(ctx, hit, guard=None, rerank=note, served=serve)
                 if serve:
                     ctx.l2_guard_reason = None  # a later candidate cleared the guard
                     ctx.layer_hit = "l2"
                     ctx.upstream_prompt_tokens = 0
+                    if ctx.cache_probe:
+                        return _probe(ctx, l1_key=key, l2_eligible=True)
                     rec = await promote_l2_hit(
                         runtime, canonical, hit.record, ctx.inbound_prompt_tokens
                     )
                     return _replay(req, ctx, rec)
 
     ctx.layer_hit = "miss"
+    if ctx.cache_probe:
+        return _probe(ctx, l1_key=key, l2_eligible=eligible)
     return await _miss(runtime, req, ctx, vec=vec)
+
+
+def _note_candidate(
+    ctx: RequestContext, hit: L2Hit, *, guard: str | None, rerank: str | None, served: bool
+) -> None:
+    """Record an examined L2 candidate for probe mode (no-op otherwise)."""
+    if ctx.cache_probe:
+        ctx.probe_candidates.append(
+            candidate_entry(
+                key=hit.record.key, score=hit.score, guard=guard, rerank=rerank, served=served
+            )
+        )
+
+
+def _probe(ctx: RequestContext, *, l1_key: str | None, l2_eligible: bool) -> JSONResponse:
+    """Probe mode terminal: explain the decision, write nothing, call nothing."""
+    m.cache_probes.labels(cache=ctx.layer_hit).inc()
+    return probe_response(ctx, _headers(ctx), l1_key=l1_key, l2_eligible=l2_eligible)
 
 
 def _replay(req: ChatRequest, ctx: RequestContext, rec) -> JSONResponse | StreamingResponse:

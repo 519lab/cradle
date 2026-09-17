@@ -50,6 +50,12 @@ cache_write_skips = Counter(
     ["reason"],
     registry=REGISTRY,
 )
+cache_probes = Counter(
+    "cradle_cache_probes_total",
+    "Probe-mode requests (decision explained, nothing served or written)",
+    ["cache"],
+    registry=REGISTRY,
+)
 upstream_errors = Counter(
     "cradle_upstream_errors_total", "Upstream errors", ["status"], registry=REGISTRY
 )

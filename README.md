@@ -65,6 +65,31 @@ Cradle picks the **backend** from the request `model` via `routes` in `config/cr
 - Reconstruction is a prefix/suffix envelope (partial PRD FR-3.1). Structural distillation is off (`features.structure: false`).
 - This is a gateway, not an inference runtime: it does not load a chat model. Upstream is whatever OpenAI-compatible API you configure.
 
+## Per-request cache controls
+
+| Header | Effect |
+|---|---|
+| `X-Cradle-Cache-Control: no-store` | Serve normally, do not store the response. |
+| `X-Cradle-Cache-Control: no-cache` / `refresh` | Skip the cache read, call upstream, store the fresh answer. |
+| `X-Cradle-Cache-TTL: <seconds>` | Per-entry TTL, clamped to `cache.ttl_s`; `0` = do not store. |
+| `X-Cradle-Cache-Control: probe` | **Dry run.** Explain what Cradle would do (L1/L2/guard/rerank outcome per candidate) without serving, writing, or calling upstream. |
+
+Probe example — tune thresholds without spending a token:
+
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
+  -H "X-Cradle-Cache-Control: probe" \
+  -d '{"model":"gpt-4o-mini","temperature":0,"messages":[{"role":"user","content":"Which city is the capital of France?"}]}'
+# (after "What is the capital of France?" was cached — real bge-small + bge-reranker output)
+# {"object":"cradle.probe","cache":"HIT-L2","would_call_upstream":false,
+#  "l1":{"key":"408a1a4e…","hit":false},
+#  "l2":{"eligible":true,"embedded":true,"hit":true,
+#        "candidates":[{"key":"3e35a800…","cosine":0.973013,"guard":"pass","rerank":"pass:8.3960","served":true}]}}
+```
+
+Every candidate the pipeline examined is listed best-first, so a rejected near-miss shows up as `"guard":"reject:numbers"` or `"rerank":"reject:<score>"` with `"served":false`.
+
 ## Metrics
 
 Token savings ratio:

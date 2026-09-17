@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from cradle.cache.records import CanonicalRequest, Principal
 
@@ -36,3 +36,8 @@ class RequestContext:
     cache_no_read: bool = False   # skip L1/L2 lookup (no-cache / refresh)
     cache_no_store: bool = False  # skip writeback (no-store)
     cache_ttl_override: int | None = None
+    # Probe mode (X-Cradle-Cache-Control: probe): run the read-side decision
+    # only and return an explanation; never write, never call upstream. The
+    # pipeline appends one entry per examined L2 candidate to probe_candidates.
+    cache_probe: bool = False
+    probe_candidates: list[dict[str, Any]] = field(default_factory=list)

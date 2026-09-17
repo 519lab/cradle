@@ -91,7 +91,7 @@ async def chat_completions(request: Request):
 def _apply_cache_directives(ctx, request: Request, max_ttl: int) -> None:
     """Per-request cache controls (enhancement #2), from request headers.
 
-    X-Cradle-Cache-Control: comma list of no-store / no-cache / refresh.
+    X-Cradle-Cache-Control: comma list of no-store / no-cache / refresh / probe.
     X-Cradle-Cache-TTL: seconds, clamped to [0, cache.ttl_s].
     """
     control = (request.headers.get("x-cradle-cache-control") or "").lower()
@@ -100,6 +100,8 @@ def _apply_cache_directives(ctx, request: Request, max_ttl: int) -> None:
         ctx.cache_no_read = True
     if "no-store" in directives:
         ctx.cache_no_store = True
+    if "probe" in directives:
+        ctx.cache_probe = True
     ttl_raw = request.headers.get("x-cradle-cache-ttl")
     if ttl_raw:
         try:
