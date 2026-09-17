@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- **`/readyz` now reflects the reranker.** When `features.l2_rerank` is on (default) but the cross-encoder failed to load, `/readyz` reports `not_ready` (503) instead of `ready` — so a container never quietly takes traffic with the issue-#5 entity-swap protection off. Previously the health check ignored the reranker, so a load failure was invisible.
 - **Cache identity now includes the resolved upstream backend.** Previously the L1/L2 cache key ignored which backend served a response, so changing a `routes:` mapping (or two named backends serving the same model glob) could replay the *old* backend's answers for the full TTL. Cache entries are now namespaced by the resolved route target + base URL. The cache schema bumped to 2, so pre-existing entries miss safely and age out on TTL.
 - **Routing-only hints no longer split the cache.** Undeclared request fields that steer provider-side caching/routing but don't change the answer (`prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`) were being hashed into the cache key, so two identical prompts differing only by such a hint cached separately — silently lowering hit rate. They are now excluded, like `stream`.
 - Bypass streams (`stream+tools`, `n!=1`, logprobs) now forward upstream SSE bytes instead of stripping everything but `delta.content`.
