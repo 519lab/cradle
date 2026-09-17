@@ -45,3 +45,6 @@ class RequestContext:
     # classified time-sensitive and given the short TTL. Surfaced as
     # X-Cradle-Volatile so a shortened TTL is observable, not silent.
     volatile_reason: str | None = None
+    # Verified L2 (gateway/audit.py): this L2 hit was sampled for a background
+    # audit against a fresh upstream answer. Surfaced as X-Cradle-Audit.
+    audit_scheduled: bool = False

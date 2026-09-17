@@ -147,6 +147,43 @@ class L2Settings(BaseModel):
     # (cradle[rerank-gpu]) and a CUDA host. device_ids selects GPU(s) for cuda.
     rerank_device: str = "cpu"
     rerank_device_ids: list[int] | None = None
+    # Verified L2 (gateway/audit.py). After serving an L2 hit, with probability
+    # audit_rate Cradle also calls upstream in the background and judges
+    # whether the fresh answer agrees with the served one. Every audit is a
+    # labeled observation: it feeds cradle_l2_audit_total{verdict} (a measured
+    # false-hit rate), an optional JSONL log under {data_dir}/audits.jsonl, and
+    # the served entry's own floor - an entry judged wrong at similarity s
+    # refuses future hits at <= s. A "disagree" also writes the fresh answer
+    # back under the querying prompt's key (self-heal). 0.0 = off. Audits
+    # spend real upstream calls.
+    audit_rate: float = 0.0
+    # Judge. "auto" = the cross-encoder reranker when loaded, else embedding
+    # cosine. Measured on bge models: the reranker separates same-meaning
+    # answers (>= 7.2) from contradictory ones (<= 2.1) cleanly, so 4.0 sits
+    # in the gap; bi-encoder cosine does NOT separate them (same 0.83-0.98
+    # overlaps wrong 0.73-0.92), so the embed judge is a weak fallback whose
+    # high threshold prefers false "disagree" (a miss) over a missed error.
+    audit_judge: str = "auto"
+    audit_rerank_threshold: float = 4.0
+    audit_embed_threshold: float = 0.90
+    audit_log: bool = True
+    # Include the query/candidate prompt text in the JSONL rows (off: hashes
+    # and keys only, per the no-prompt-text-in-logs rule).
+    audit_log_text: bool = False
+
+    @field_validator("audit_rate")
+    @classmethod
+    def _audit_rate(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("l2.audit_rate must be within [0, 1]")
+        return v
+
+    @field_validator("audit_judge")
+    @classmethod
+    def _audit_judge(cls, v: str) -> str:
+        if v not in {"auto", "rerank", "embed"}:
+            raise ValueError("l2.audit_judge must be 'auto', 'rerank' or 'embed'")
+        return v
 
     @field_validator("rerank_device")
     @classmethod

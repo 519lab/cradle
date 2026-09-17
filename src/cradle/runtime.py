@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -27,3 +28,10 @@ class Runtime:
     l2_ready: bool = False
     embedder_ready: bool = False
     reranker_ready: bool = False
+    # In-flight background L2 audits (gateway/audit.py). Tracked so shutdown can
+    # drain them and tests can wait for them; a task removes itself when done.
+    audit_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+
+    async def drain_audits(self, timeout_s: float = 30.0) -> None:
+        if self.audit_tasks:
+            await asyncio.wait(set(self.audit_tasks), timeout=timeout_s)

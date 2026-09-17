@@ -85,7 +85,7 @@ async def query(
 
 
 def upsert_sync(client: QdrantClient, settings: Settings, vec: list[float], record: CacheRecord) -> None:
-    pid = str(uuid.uuid5(uuid.NAMESPACE_URL, record.key))
+    pid = point_id(record.key)
     client.upsert(
         collection_name=settings.l2.collection,
         points=[
@@ -103,6 +103,67 @@ async def upsert(
 ) -> None:
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, upsert_sync, client, settings, vec, record)
+
+
+def point_id(key: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def record_audit_sync(
+    client: QdrantClient,
+    settings: Settings,
+    key: str,
+    *,
+    query_similarity: float,
+    agree: bool,
+) -> CacheRecord | None:
+    """Fold one audit observation into the stored point's payload.
+
+    A disagreement raises the entry's ``audit_floor`` to the query similarity
+    (never lowers it), so the entry refuses future matches at or below the
+    similarity that already produced a wrong answer. Returns the updated
+    record, or None if the point no longer exists (expired/purged).
+    """
+    pid = point_id(key)
+    found = client.retrieve(
+        collection_name=settings.l2.collection, ids=[pid], with_payload=True, with_vectors=False
+    )
+    if not found:
+        return None
+    record = CacheRecord.model_validate(dict(found[0].payload or {}))
+    if agree:
+        record.audit_agree += 1
+    else:
+        record.audit_disagree += 1
+        floor = record.audit_floor or 0.0
+        record.audit_floor = max(floor, query_similarity)
+    client.set_payload(
+        collection_name=settings.l2.collection,
+        payload={
+            "audit_floor": record.audit_floor,
+            "audit_agree": record.audit_agree,
+            "audit_disagree": record.audit_disagree,
+        },
+        points=[pid],
+    )
+    return record
+
+
+async def record_audit(
+    client: QdrantClient,
+    settings: Settings,
+    key: str,
+    *,
+    query_similarity: float,
+    agree: bool,
+) -> CacheRecord | None:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: record_audit_sync(
+            client, settings, key, query_similarity=query_similarity, agree=agree
+        ),
+    )
 
 
 def purge_expired_sync(client: QdrantClient, settings: Settings, now: int | None = None) -> int:

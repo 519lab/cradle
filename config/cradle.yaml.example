@@ -88,6 +88,22 @@ l2:
   query_top_k: 5
   rerank_device: cpu
   rerank_device_ids: null
+  # Verified L2: sample this fraction of served L2 hits and, in the background,
+  # call upstream again and judge whether the fresh answer agrees with the
+  # served one. Measures the real false-hit rate (cradle_l2_audit_total),
+  # teaches each entry a floor below which it refuses to serve again,
+  # self-heals wrong hits, and logs labeled observations to
+  # {data_dir}/audits.jsonl. 0 = off. Audits spend real upstream calls, so
+  # 0.01-0.05 is the sensible range.
+  audit_rate: 0.0
+  # Judge: auto = the cross-encoder reranker when loaded (measured: same
+  # answers >= 7.2, contradictory <= 2.1 on bge-reranker-base), else answer
+  # cosine (weak: cannot separate contradictions; high threshold on purpose).
+  audit_judge: auto
+  audit_rerank_threshold: 4.0
+  audit_embed_threshold: 0.90
+  audit_log: true
+  audit_log_text: false   # true = include prompt text in the JSONL rows
 
 compress:
   structure_min_chars: 400

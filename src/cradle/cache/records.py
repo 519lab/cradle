@@ -98,6 +98,13 @@ class CacheRecord(BaseModel):
     response_format: Any | None = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
+    # Verified-L2 state, learned from audits (gateway/audit.py). audit_floor is
+    # the highest query similarity at which this entry was judged WRONG: a
+    # later candidate match at or below it is refused. Counts are for
+    # observability and offline calibration.
+    audit_floor: float | None = None
+    audit_agree: int = 0
+    audit_disagree: int = 0
 
 
 class L2Hit(BaseModel):

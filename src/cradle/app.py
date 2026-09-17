@@ -183,6 +183,8 @@ def create_app(
         yield
         stop.set()
         task.cancel()
+        # Let in-flight L2 audits finish (bounded) so their observations land.
+        await runtime.drain_audits()
         embed_pool.shutdown(wait=False)
         if http is None:
             await client.aclose()
