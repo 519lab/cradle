@@ -14,3 +14,4 @@ data/
 uv.lock.bak
 .mypy_cache/
 config/cradle.yaml
+docker-compose.yml
