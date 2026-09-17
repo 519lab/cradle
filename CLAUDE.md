@@ -37,7 +37,7 @@ CRADLE_SKIP_LATENCY=1 uv run pytest
 
 Default config: `config/cradle.yaml`. Override the fallback upstream with `CRADLE_UPSTREAM_BASE_URL`. Named backends live under `upstreams:` with `routes:` (`fnmatch` on `model`). Proxy listen is `127.0.0.1:8000`. Default is intercept mode: no Cradle API key; client `Authorization` is forwarded and used as the cache tenant. Optional `auth.keys` is an allowlist. OpenAI-compatible clients only; Claude Code’s Anthropic `/v1/messages` is not implemented.
 
-L2 (Qdrant local) requires a **single** uvicorn worker. `WEB_CONCURRENCY` / `UVICORN_WORKERS` other than `1` is a startup error. Bypass streams (`stream+tools`, `n!=1`, logprobs) are raw SSE passthrough; cacheable stream misses still wrap text completions.
+L2 (Qdrant local) requires a **single** uvicorn worker. `WEB_CONCURRENCY` / `UVICORN_WORKERS` other than `1` is a startup error. Bypass streams (`stream+tools`, `n!=1`, logprobs) are raw SSE body passthrough (with an allowlist of upstream headers — `retry-after`, `x-ratelimit-*`, renamed request id — relayed); cacheable stream misses still wrap text completions. On a cacheable wrap-stream miss Cradle always requests `stream_options.include_usage` upstream (so real token usage is cached) even when the client did not; client-facing usage emission stays gated on the client's own flag. Upstream error bodies and `retry-after`/`x-ratelimit-*` headers are forwarded on errors too.
 
 ## Layout
 
