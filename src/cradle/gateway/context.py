@@ -41,3 +41,7 @@ class RequestContext:
     # pipeline appends one entry per examined L2 candidate to probe_candidates.
     cache_probe: bool = False
     probe_candidates: list[dict[str, Any]] = field(default_factory=list)
+    # Volatility guard outcome (cache/volatility.py): the reason a prompt was
+    # classified time-sensitive and given the short TTL. Surfaced as
+    # X-Cradle-Volatile so a shortened TTL is observable, not silent.
+    volatile_reason: str | None = None

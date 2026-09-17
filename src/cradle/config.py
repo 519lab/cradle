@@ -100,6 +100,20 @@ class CacheSettings(BaseModel):
     evict_old_pipeline: bool = True
     purge_interval_s: int = 300
     l1_size_limit_bytes: int = 1_000_000_000
+    # Volatility guard (cache/volatility.py): prompts that ask about something
+    # time-sensitive ("latest version", "current price", "today", weather,
+    # news) get volatile_ttl_s instead of ttl_s so a correct-but-stale answer
+    # is not replayed for 24 h. 0 = never store volatile prompts. An explicit
+    # client X-Cradle-Cache-TTL always wins over the guard.
+    volatility_guard: bool = True
+    volatile_ttl_s: int = 300
+
+    @field_validator("volatile_ttl_s")
+    @classmethod
+    def _volatile_ttl(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("cache.volatile_ttl_s must be >= 0")
+        return v
 
 
 class L2Settings(BaseModel):

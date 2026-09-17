@@ -13,6 +13,7 @@ from cradle.cache import l1 as l1mod
 from cradle.cache import l2 as l2mod
 from cradle.cache.guard import guard_reason
 from cradle.cache.records import L2Filter, L2Hit
+from cradle.cache.volatility import volatile_reason_for
 from cradle.compress.engine import compress
 from cradle.gateway.context import RequestContext
 from cradle.gateway.errors import openai_error
@@ -71,7 +72,23 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
         h["X-Cradle-Guard"] = f"reject:{ctx.l2_guard_reason}"
     if ctx.l2_rerank_note is not None:
         h["X-Cradle-Rerank"] = ctx.l2_rerank_note
+    if ctx.volatile_reason is not None:
+        h["X-Cradle-Volatile"] = ctx.volatile_reason
     return h
+
+
+def _apply_volatility_guard(runtime: Runtime, ctx: RequestContext) -> None:
+    """Clamp the TTL of time-sensitive prompts unless the client set one."""
+    settings = runtime.settings.cache
+    if not settings.volatility_guard or ctx.cache_ttl_override is not None:
+        return
+    assert ctx.canonical is not None
+    reason = volatile_reason_for(ctx.canonical.messages)
+    if reason is None:
+        return
+    ctx.volatile_reason = reason
+    ctx.cache_ttl_override = settings.volatile_ttl_s
+    m.volatile_prompts.labels(reason=reason).inc()
 
 
 def _include_usage(req: ChatRequest) -> bool:
@@ -208,6 +225,7 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
         if ctx.cache_probe:
             return _probe(ctx, l1_key=None, l2_eligible=False)
         return await _miss(runtime, req, ctx, vec=None)
+    _apply_volatility_guard(runtime, ctx)
 
     key = l1_key(canonical)
     # Per-request no-cache/refresh (enhancement #2): skip the read, still write.
@@ -273,7 +291,11 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                     if ctx.cache_probe:
                         return _probe(ctx, l1_key=key, l2_eligible=True)
                     rec = await promote_l2_hit(
-                        runtime, canonical, hit.record, ctx.inbound_prompt_tokens
+                        runtime,
+                        canonical,
+                        hit.record,
+                        ctx.inbound_prompt_tokens,
+                        ttl_s=_effective_ttl(runtime, ctx),
                     )
                     return _replay(req, ctx, rec)
 
