@@ -3,11 +3,16 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        BAKE_EMBEDDINGS: "0"
+    image: cradle:ci
     environment:
       CRADLE_SERVER__HOST: "0.0.0.0"
       CRADLE_DATA_DIR: /data
-      CRADLE_API_KEY: ci-test-key
+      CRADLE_CONFIG: /app/config/cradle.yaml
+      CRADLE_FEATURES__L2: "false"
+      CRADLE_UPSTREAM_BASE_URL: http://127.0.0.1:9
     tmpfs:
-      - /data
+      - /data:uid=1000,gid=1000,mode=0700
     ports:
       - "8000:8000"

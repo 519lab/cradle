@@ -68,9 +68,15 @@ class UpstreamSettings(BaseModel):
     base_url: str = "http://127.0.0.1:8080/v1"
     api_key_env: str = "CRADLE_UPSTREAM_API_KEY"
     timeout_s: float = 120
-    pass_through_client_auth: bool = False
+    pass_through_client_auth: bool = True
     models_passthrough: bool = False
     models: list[str] = Field(default_factory=lambda: ["gpt-4o-mini"])
+
+
+class RouteRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    to: str
 
 
 class FeatureFlags(BaseModel):
@@ -156,6 +162,8 @@ class Settings(BaseSettings):
     pipeline_version: str = "v1"
     auth: AuthSettings = Field(default_factory=AuthSettings)
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
+    upstreams: dict[str, UpstreamSettings] = Field(default_factory=dict)
+    routes: list[RouteRule] = Field(default_factory=list)
     features: FeatureFlags = Field(default_factory=FeatureFlags)
     cache: CacheSettings = Field(default_factory=CacheSettings)
     l2: L2Settings = Field(default_factory=L2Settings)
@@ -173,6 +181,9 @@ class Settings(BaseSettings):
         data_dir = os.environ.get("CRADLE_DATA_DIR")
         if data_dir:
             self.data_dir = Path(data_dir)
+        for rule in self.routes:
+            if rule.to != "default" and rule.to not in self.upstreams:
+                raise ValueError(f"route model={rule.model!r} references unknown upstream {rule.to!r}")
         return self
 
     @classmethod

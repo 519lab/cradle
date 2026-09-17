@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+
+def resolve_cache_dir(data_dir: Path) -> Path:
+    env = os.environ.get("FASTEMBED_CACHE_PATH", "").strip()
+    if env:
+        return Path(env)
+    return data_dir / "models" / "fastembed"
 
 
 class FastEmbedEmbedder:

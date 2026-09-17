@@ -6,7 +6,8 @@ from typing import Any
 
 import httpx
 
-from cradle.config import Settings
+from cradle.config import Settings, UpstreamSettings
+from cradle.upstream.route import advertised_models
 
 
 class UpstreamError(Exception):
@@ -16,16 +17,16 @@ class UpstreamError(Exception):
         self.body = body
 
 
-def _url(settings: Settings, path: str) -> str:
-    return settings.upstream.base_url.rstrip("/") + path
+def _url(upstream: UpstreamSettings, path: str) -> str:
+    return upstream.base_url.rstrip("/") + path
 
 
-def _headers(settings: Settings, client_authorization: str | None = None) -> dict[str, str]:
+def _headers(upstream: UpstreamSettings, client_authorization: str | None = None) -> dict[str, str]:
     headers = {"content-type": "application/json"}
-    if settings.upstream.pass_through_client_auth and client_authorization:
+    if upstream.pass_through_client_auth and client_authorization:
         headers["authorization"] = client_authorization
         return headers
-    key = os.environ.get(settings.upstream.api_key_env, "")
+    key = os.environ.get(upstream.api_key_env, "")
     if key:
         headers["authorization"] = f"Bearer {key}"
     return headers
@@ -40,17 +41,24 @@ def _error_body(raw: str) -> Any:
 
 async def chat(
     client: httpx.AsyncClient,
-    settings: Settings,
+    upstream: UpstreamSettings,
     payload: dict[str, Any],
     authorization: str | None = None,
 ) -> dict[str, Any]:
     body = dict(payload)
     body.pop("stream", None)
-    resp = await client.post(
-        _url(settings, "/chat/completions"),
-        json=body,
-        headers=_headers(settings, authorization),
-    )
+    try:
+        resp = await client.post(
+            _url(upstream, "/chat/completions"),
+            json=body,
+            headers=_headers(upstream, authorization),
+            timeout=upstream.timeout_s,
+        )
+    except httpx.RequestError as exc:
+        raise UpstreamError(
+            502,
+            {"error": {"message": str(exc), "type": "server_error", "code": "upstream_error"}},
+        ) from exc
     if resp.status_code >= 400:
         try:
             data = resp.json()
@@ -62,7 +70,7 @@ async def chat(
 
 async def start_chat_stream(
     client: httpx.AsyncClient,
-    settings: Settings,
+    upstream: UpstreamSettings,
     payload: dict[str, Any],
     authorization: str | None = None,
 ) -> httpx.Response:
@@ -70,11 +78,18 @@ async def start_chat_stream(
     body["stream"] = True
     request = client.build_request(
         "POST",
-        _url(settings, "/chat/completions"),
+        _url(upstream, "/chat/completions"),
         json=body,
-        headers=_headers(settings, authorization),
+        headers=_headers(upstream, authorization),
+        timeout=upstream.timeout_s,
     )
-    resp = await client.send(request, stream=True)
+    try:
+        resp = await client.send(request, stream=True)
+    except httpx.RequestError as exc:
+        raise UpstreamError(
+            502,
+            {"error": {"message": str(exc), "type": "server_error", "code": "upstream_error"}},
+        ) from exc
     if resp.status_code >= 400:
         raw = (await resp.aread()).decode("utf-8", "replace")
         await resp.aclose()
@@ -90,10 +105,15 @@ async def list_models(
     if not settings.upstream.models_passthrough:
         return {
             "object": "list",
-            "data": [{"id": m, "object": "model", "owned_by": "cradle"} for m in settings.upstream.models],
+            "data": [
+                {"id": m, "object": "model", "owned_by": "cradle"}
+                for m in advertised_models(settings)
+            ],
         }
     resp = await client.get(
-        _url(settings, "/models"), headers=_headers(settings, authorization)
+        _url(settings.upstream, "/models"),
+        headers=_headers(settings.upstream, authorization),
+        timeout=settings.upstream.timeout_s,
     )
     resp.raise_for_status()
     return resp.json()

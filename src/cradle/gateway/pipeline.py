@@ -35,6 +35,7 @@ from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suff
 from cradle.reconstruct.templates import template_for
 from cradle.tokens import count_chat_prompt
 from cradle.upstream.openai import UpstreamError, chat, start_chat_stream
+from cradle.upstream.route import resolve_upstream
 
 if TYPE_CHECKING:
     from cradle.runtime import Runtime
@@ -55,6 +56,7 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
         "X-Cradle-Pipeline": ctx.canonical.pipeline_version if ctx.canonical else "",
         "X-Cradle-Inbound-Tokens": str(ctx.inbound_prompt_tokens),
         "X-Cradle-Upstream-Tokens": str(ctx.upstream_prompt_tokens),
+        "X-Cradle-Upstream": ctx.upstream_name,
     }
     if ctx.l2_score is not None:
         h["X-Cradle-Similarity"] = f"{ctx.l2_score:.6f}"
@@ -127,6 +129,7 @@ def _observe(ctx: RequestContext) -> None:
 async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -> JSONResponse | StreamingResponse:
     canonical = canonicalize(req, ctx.principal, runtime.settings)
     ctx.canonical = canonical
+    ctx.upstream_name, _ = resolve_upstream(runtime.settings, req.model)
     ctx.inbound_prompt_tokens = count_chat_prompt(req.messages, req.model)
     cacheable = is_cacheable(canonical, req, runtime.settings)
     if not cacheable:
@@ -200,16 +203,18 @@ async def _miss(
     compressed.template.brand_suffix = tenant_tmpl.brand_suffix
     compressed.template.mode = tenant_tmpl.mode
     payload = _upstream_payload(req, compressed.messages)
+    _name, target = resolve_upstream(runtime.settings, req.model)
+    ctx.upstream_name = _name
     if req.stream:
-        return await _miss_stream(runtime, req, ctx, vec, compressed, payload)
-    return await _miss_json(runtime, req, ctx, vec, compressed, payload)
+        return await _miss_stream(runtime, req, ctx, vec, compressed, payload, target)
+    return await _miss_json(runtime, req, ctx, vec, compressed, payload, target)
 
 
-async def _miss_json(runtime, req, ctx, vec, compressed, payload) -> JSONResponse:
+async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSONResponse:
     t0 = time.perf_counter()
     try:
         completion = await chat(
-            runtime.http, runtime.settings, payload, authorization=_client_auth(ctx)
+            runtime.http, target, payload, authorization=_client_auth(ctx)
         )
     except UpstreamError as exc:
         return _upstream_error_response(ctx, exc)
@@ -242,11 +247,11 @@ def _sse_headers(ctx: RequestContext) -> dict[str, str]:
     return headers
 
 
-async def _miss_stream(runtime, req, ctx, vec, compressed, payload) -> JSONResponse | StreamingResponse:
+async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> JSONResponse | StreamingResponse:
     t0 = time.perf_counter()
     try:
         resp = await start_chat_stream(
-            runtime.http, runtime.settings, payload, authorization=_client_auth(ctx)
+            runtime.http, target, payload, authorization=_client_auth(ctx)
         )
     except UpstreamError as exc:
         return _upstream_error_response(ctx, exc)

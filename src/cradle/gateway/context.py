@@ -22,3 +22,4 @@ class RequestContext:
     t_upstream_s: float = 0.0
     t_reconstruct_s: float = 0.0
     headers: dict[str, str] = field(default_factory=dict)
+    upstream_name: str = "default"

@@ -12,31 +12,54 @@ No Redis. No Qdrant server process. No Ollama.
 
 ## Quick start
 
-Point the OpenAI SDK (or any compatible client) at Cradle’s base URL instead of the provider. Cradle forwards to `upstream.base_url`.
+Point the OpenAI SDK (or any compatible client) at Cradle’s base URL instead of the provider. Keep the same `Authorization` header; Cradle forwards it upstream. No Cradle-issued API key.
 
 ```bash
-cp .env.example .env   # CRADLE_API_KEY, CRADLE_UPSTREAM_API_KEY
+cp .env.example .env   # CRADLE_UPSTREAM_BASE_URL if the provider is not on localhost:8080
 uv sync --group dev
 uv run python -m cradle
 ```
 
-Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0.1:8080/v1`; set `CRADLE_UPSTREAM_BASE_URL` to the real provider (e.g. `https://api.openai.com/v1`). For a service deploy, `compose.yml` binds `0.0.0.0:8000`.
+Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0.1:8080/v1`; set `CRADLE_UPSTREAM_BASE_URL` to the real provider (e.g. `https://api.openai.com/v1`).
+
+## Docker
+
+```bash
+cp .env.example .env   # optional CRADLE_UPSTREAM_BASE_URL
+docker compose up --build
+```
+
+Gateway is at `http://127.0.0.1:8000`. Compose default upstream is `http://host.docker.internal:8080/v1` (a server on the host, not `127.0.0.1` inside the container). Override with `CRADLE_UPSTREAM_BASE_URL`. L1/L2 state is the `cradle-data` volume (`/data`). FastEmbed weights are baked at `/opt/cradle/models/fastembed` so the volume does not hide them.
+
+The image does **not** declare `VOLUME /data`. CI uses `compose.ci.yml` with tmpfs on `/data` and L2 off.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Authorization: Bearer $CRADLE_API_KEY" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-One gateway key ⇒ one `user_id`. Add more keys in `config/cradle.yaml` `auth.keys`. The client never sees the upstream key.
+Drop-in: point the client at Cradle and keep its normal API key. Cache entries are isolated by SHA-256 of the presented Bearer token. Optional `auth.keys` in YAML is an allowlist if you want Cradle-issued keys instead.
+
+### Clients (OpenAI-compatible)
+
+| Client | Point at Cradle |
+|---|---|
+| Codex CLI | `openai_base_url` or `[model_providers.cradle] base_url` in `~/.codex/config.toml` |
+| Grok CLI | `model.<id>.base_url` / `GROK_XAI_API_BASE_URL` toward Cradle |
+| llama.cpp / LiteLLM / OpenAI SDK | `OPENAI_BASE_URL=http://<cradle>:8000/v1` |
+
+Cradle picks the **backend** from the request `model` via `routes` in `config/cradle.yaml` (`gpt-*` → OpenAI, `grok-*` → xAI, `*` → local llama.cpp / LiteLLM). Unmatched models use `upstream.base_url`.
+
+**Claude Code** talks the Anthropic Messages API (`ANTHROPIC_BASE_URL`, `/v1/messages`), not OpenAI `/v1/chat/completions`. Point it at LiteLLM (or similar) that already speaks Anthropic, or wait for a Cradle Anthropic adapter. Do not set `ANTHROPIC_BASE_URL` to Cradle today.
 
 ## Ops notes
 
 - **Qdrant local is not recommended above 20,000 points** (`QdrantLocal.LARGE_DATA_THRESHOLD`). The scale path is a Qdrant **server** (`l2.mode: server` later, not implemented in v1), not more local-mode tuning. Watch `cradle_l2_points`.
 - Dockerfile does **not** declare `VOLUME /data`. CI compose uses tmpfs on `/data`.
 - `/metrics` requires the same Bearer key by default.
-- MIT license. Local git only — no GitHub remote and no PyPI in v1.
+- MIT license. GitHub: `519lab/cradle`. No PyPI in v1.
 - Reconstruction is a prefix/suffix envelope (partial PRD FR-3.1). Structural distillation is off (`features.structure: false`).
 - This is a gateway, not an inference runtime: it does not load a chat model. Upstream is whatever OpenAI-compatible API you configure.
 

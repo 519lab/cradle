@@ -220,6 +220,25 @@ def test_oversized_body(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         assert r.status_code == 413
 
 
+def test_upstream_connect_error_is_502(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
+        features=FeatureFlags(l2=False, cache=False, compression=False, reconstruction=False),
+        upstream=UpstreamSettings(base_url="http://127.0.0.1:9/v1", timeout_s=1),
+    )
+    app = create_app(settings=settings, embedder=FakeEmbedder())
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer test-key-aaaaaaaa"},
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code == 502
+        assert r.json()["error"]["code"] == "upstream_error"
+
+
 def test_multi_worker_refused(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
