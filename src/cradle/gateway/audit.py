@@ -141,7 +141,10 @@ async def run_audit(
     compressed.template.brand_prefix = tmpl.brand_prefix
     compressed.template.brand_suffix = tmpl.brand_suffix
     compressed.template.mode = tmpl.mode
-    payload = req.model_dump(exclude_none=True)
+    # Same pass-through contract as the miss path (issue #26): the audit re-asks
+    # upstream the request a miss would have sent, so it must forward only fields the
+    # client set — not Cradle's sampling defaults.
+    payload = req.model_dump(exclude_unset=True, exclude_none=True)
     payload["messages"] = [msg.model_dump(exclude_none=True) for msg in compressed.messages]
     payload.pop("stream", None)
     payload.pop("stream_options", None)
