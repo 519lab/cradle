@@ -32,7 +32,7 @@ from cradle.gateway.sse import (
     synthesize_sse,
     usage_frame,
 )
-from cradle.gateway.writeback import promote_l2_hit, record_from, writeback
+from cradle.gateway.writeback import cache_skip_reason, promote_l2_hit, record_from, writeback
 from cradle.metrics import prometheus as m
 from cradle.normalize import cache_namespace, canonicalize, is_cacheable, l1_key, l2_eligible
 from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suffix
@@ -166,31 +166,9 @@ async def _rerank_ok(runtime: Runtime, query_text: str, candidate_text: str) -> 
     return False, f"reject:{score:.4f}"
 
 
-# finish_reasons that indicate a complete, trustworthy answer worth caching.
-# `length` (truncated), `content_filter` (refused), tool_calls, and empty bodies
-# would otherwise become the permanent cached answer for a prompt and its
-# paraphrases (enhancement #3, write-quality gate).
-_CACHEABLE_FINISH = frozenset({"stop", "eos"})
-
-
 def _effective_ttl(runtime: Runtime, ctx: RequestContext) -> int:
     ttl = ctx.cache_ttl_override
     return ttl if ttl is not None else runtime.settings.cache.ttl_s
-
-
-def _response_cache_skip_reason(completion: dict) -> str | None:
-    """Return a skip reason if this response must NOT be cached, else None."""
-    choices = completion.get("choices") or []
-    if not choices:
-        return "no_choices"
-    choice = choices[0]
-    finish = choice.get("finish_reason")
-    if finish not in _CACHEABLE_FINISH:
-        return f"finish_{finish}"
-    content = (choice.get("message") or {}).get("content")
-    if not content or not content.strip():
-        return "empty_content"
-    return None
 
 
 def _observe(ctx: RequestContext) -> None:
@@ -407,7 +385,7 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
         out = merge(completion, compressed.template)
     ctx.t_reconstruct_s = time.perf_counter() - t1
     ttl = _effective_ttl(runtime, ctx)
-    skip = _response_cache_skip_reason(out)
+    skip = cache_skip_reason(out)
     if ctx.cache_no_store or ttl == 0:
         skip = skip or "no_store"
     if ctx.layer_hit != "bypass" and ctx.canonical is not None and skip is None:
@@ -540,7 +518,7 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             **acc.extra_top,
         }
         ttl = _effective_ttl(runtime, ctx)
-        skip = _response_cache_skip_reason(completion)
+        skip = cache_skip_reason(completion)
         if ctx.cache_no_store or ttl == 0:
             skip = skip or "no_store"
         if (

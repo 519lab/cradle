@@ -18,6 +18,29 @@ def _embed_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# finish_reasons that indicate a complete, trustworthy answer worth caching.
+# `length` (truncated), `content_filter` (refused), tool_calls, and empty bodies
+# would otherwise become the permanent cached answer for a prompt and its
+# paraphrases (enhancement #3, write-quality gate). Shared by the miss path
+# and the audit self-heal (issue #24) so no path can cache what the other refuses.
+CACHEABLE_FINISH = frozenset({"stop", "eos"})
+
+
+def cache_skip_reason(completion: dict[str, Any]) -> str | None:
+    """Return a skip reason if this response must NOT be cached, else None."""
+    choices = completion.get("choices") or []
+    if not choices:
+        return "no_choices"
+    choice = choices[0]
+    finish = choice.get("finish_reason")
+    if finish not in CACHEABLE_FINISH:
+        return f"finish_{finish}"
+    content = (choice.get("message") or {}).get("content")
+    if not content or not content.strip():
+        return "empty_content"
+    return None
+
+
 def record_from(
     canonical: CanonicalRequest,
     response: dict[str, Any],

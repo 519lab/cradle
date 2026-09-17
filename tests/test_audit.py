@@ -61,6 +61,18 @@ async def _upstream(request: httpx.Request) -> httpx.Response:
     body = request.content.decode().lower()
     if "fail-audit" in body:
         return httpx.Response(500, json={"error": {"message": "boom"}})
+    if "empty-audit" in body:
+        # What the LAN llama.cpp upstream really returned for one prompt (issue #24):
+        # a 200 with finish_reason stop and no content.
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-empty", "object": "chat.completion", "created": 1, "model": "qwen",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": ""}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+            },
+        )
     answer = "berlin" if "germany" in body else "paris" if "france" in body else "other"
     return httpx.Response(
         200,
@@ -270,6 +282,27 @@ def test_audit_upstream_error_is_counted_not_raised(client: TestClient) -> None:
     rows = [json.loads(x) for x in (rt.settings.data_dir / AUDIT_LOG_NAME).read_text().splitlines()]
     assert rows[-1]["verdict"] == "error"
     assert _l2_payload(client, rows[-1]["hit_key"])["audit_floor"] is None
+
+
+def test_empty_fresh_answer_is_not_evidence_and_is_never_cached(client: TestClient) -> None:
+    """Issue #24: an audit whose fresh upstream answer fails the write-quality
+    gate must not raise the floor and must not self-heal (the promoted copy of
+    the served answer stays; an empty body never replaces it)."""
+    before = _verdicts()
+    _ask(client, "what is the capital of France")
+    r = _ask(client, "empty-audit: what is the capital of France")  # colliding hit
+    assert r.headers["X-Cradle-Cache"] == "HIT-L2" and "paris" in r.text
+    _drain(client)
+    after = _verdicts()
+    assert after.get("error", 0) - before.get("error", 0) == 1
+    assert after.get("disagree", 0) == before.get("disagree", 0)
+    rt = client.app.state.runtime
+    rows = [json.loads(x) for x in (rt.settings.data_dir / AUDIT_LOG_NAME).read_text().splitlines()]
+    assert rows[-1]["verdict"] == "error" and rows[-1]["skip"] == "empty_content"
+    assert _l2_payload(client, rows[-1]["hit_key"])["audit_floor"] is None
+    # The querying prompt still replays the served (non-empty) answer, not "".
+    again = _ask(client, "empty-audit: what is the capital of France")
+    assert again.headers["X-Cradle-Cache"] == "HIT-L1" and "paris" in again.text
 
 
 def test_audit_off_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
