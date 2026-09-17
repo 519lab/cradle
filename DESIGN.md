@@ -675,7 +675,7 @@ Tests (`tests/test_normalize.py`): `response_format`, `seed`, `tool_choice` must
 5. **JSON key sort:** dict `content`, `tools`, `tool_choice`, `tool_calls`, `response_format`, `logit_bias`, request `extras`, and message `extras` dumped with `sort_keys=True` then `json.loads`.
 6. **Floats:** `temperature`, `top_p`, `presence_penalty`, `frequency_penalty` rounded to 6 decimal places.
 7. **`system_prompt_version`:** `sha256(NFKC(concat of system **and developer** message contents with "\n\n")).hexdigest()[:16]`. None → `"none"`.
-8. **`pipeline_version`:** `settings.pipeline_version` (top-level, default `"v1"`). Bump when compression or wrap behavior changes.
+8. **`pipeline_version`:** `settings.pipeline_version` (top-level, default `"v2"`). Bump when compression or wrap behavior changes.
 9. **Do not** lowercase. Do not include the Bearer token.
 
 **Embed text (L2):** canonical messages as `{role}: {content}\n`, excluding tenant/user (filters, not vector).
@@ -738,7 +738,7 @@ L2 point: `id=str(uuid.uuid5(uuid.NAMESPACE_URL, key))`, vector 384 floats, payl
 | Event | Action |
 | --- | --- |
 | TTL 86400 | L1 native expire; L2 `expires_at >= now` filter + purge |
-| `pipeline_version` change | Hash miss. Startup `evict_tag(old)` if `cache.evict_old_pipeline` (needs `tag_index=True`). L2 filter by new version. |
+| `pipeline_version` change | Hash miss (new version is folded into the L1 key and the L2 filter). Old-version entries are not served and age out on TTL — there is no startup eviction (the tag is written for `l1.evict_tag`, but nothing persists the previous version to evict; see #27). A bump is therefore reversible within the entries' TTL. |
 | System/developer prompt change | `system_prompt_version` changes → L1 miss, L2 filter miss. |
 | Manual | Delete `{data_dir}/l1` and `{data_dir}/l2`. No public DELETE in v1. |
 
@@ -1104,7 +1104,6 @@ features:
 cache:
   ttl_s: 86400
   max_temperature: 1.0
-  evict_old_pipeline: true
   purge_interval_s: 300
   l1_size_limit_bytes: 1000000000
 

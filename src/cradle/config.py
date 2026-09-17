@@ -97,7 +97,6 @@ class CacheSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ttl_s: int = 86400
     max_temperature: float = 1.0
-    evict_old_pipeline: bool = True
     purge_interval_s: int = 300
     l1_size_limit_bytes: int = 1_000_000_000
     # Volatility guard (cache/volatility.py): prompts that ask about something

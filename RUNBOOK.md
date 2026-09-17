@@ -86,6 +86,7 @@ These raise during the lifespan startup and the process exits — a crash-loop, 
 | `data_dir` not writable/executable | `PermissionError` re-raised | Fix perms (dir is created `0700`) |
 | Embedder dim mismatch | `RuntimeError: embed dim N != 384` | Wrong `l2.model`/`l2.dim` |
 | `features.local_1b` on without extra | `RuntimeError: features.local_1b requires extra cradle[local-1b]` | Install extra or turn the flag off |
+| Unknown key in `cradle.yaml` (e.g. a config field removed in an upgrade) | `ValidationError: Extra inputs are not permitted` | Remove the stale key — every config model is `extra="forbid"`, so an unrecognized key is fatal, not ignored |
 
 **Reranker warm-up failure does NOT crash startup.** It is caught, logged
 (`reranker warm-up failed; L2 rerank is degraded`), leaves `reranker_ready=False`, and
@@ -326,10 +327,10 @@ setting it back **within the entries' TTL** (they are filtered out, not deleted;
 loop only removes TTL-expired entries). This is the preferred lever after a bad-cache
 incident or a change to compression/reconstruction behavior. Prefer it over wiping state.
 
-> Note: the `cache.evict_old_pipeline` config knob (default `true`) is currently **not
-> wired to anything** — nothing in the code reads it, so it does not actively delete
-> old-version entries. The reversibility above holds regardless of its value. (Dead config
-> field to remove or implement — tracked in #27.)
+> Note: there is deliberately **no startup eviction** of old-`pipeline_version` entries —
+> they are filtered out of reads and age out on TTL, which is what keeps the bump
+> reversible. (A dead `cache.evict_old_pipeline` config flag that never did this was
+> removed in #27.)
 
 ### 7.3 Destructive resets — **Greg runs these, not Claude/automation**
 
