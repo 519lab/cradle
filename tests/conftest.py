@@ -18,6 +18,7 @@ from cradle.config import (
     UpstreamSettings,
 )
 from cradle.embeddings.fake import FakeEmbedder
+from tests.fake_rerank import AllowReranker
 from tests.fake_upstream import fake_app
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +59,9 @@ def settings(tmp_path: Path, api_key: str) -> Settings:
 def client(settings: Settings) -> Iterator[TestClient]:
     transport = httpx.ASGITransport(app=fake_app)
     http = httpx.AsyncClient(transport=transport, base_url="http://upstream")
-    app = create_app(settings=settings, embedder=FakeEmbedder(), http=http)
+    app = create_app(
+        settings=settings, embedder=FakeEmbedder(), http=http, reranker=AllowReranker()
+    )
     with TestClient(app) as c:
         yield c
 

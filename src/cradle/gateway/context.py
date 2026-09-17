@@ -17,6 +17,10 @@ class RequestContext:
     # rejected it (issue #5): "numbers" / "negation" / "no-text". Surfaced as
     # X-Cradle-Guard so a guard-forced miss is observable, not silent.
     l2_guard_reason: str | None = None
+    # Rerank stage outcome, surfaced as X-Cradle-Rerank: the score for a served
+    # hit ("pass:<score>"), a rejection ("reject:<score>"), or "fail-open" when
+    # the reranker was unavailable and the candidate was served anyway.
+    l2_rerank_note: str | None = None
     inbound_prompt_tokens: int = 0
     upstream_prompt_tokens: int = 0
     t_l1_s: float = 0.0

@@ -39,3 +39,22 @@ def test_flat_upstream_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_cosine_floor() -> None:
     with pytest.raises(ValidationError):
         L2Settings(cosine_threshold=0.84)
+
+
+def test_rerank_defaults() -> None:
+    s = L2Settings()
+    assert s.rerank_model == "BAAI/bge-reranker-base"
+    assert s.rerank_threshold == 4.0
+    assert s.rerank_device == "cpu"
+    assert s.rerank_device_ids is None
+
+
+def test_rerank_device_cuda_ok() -> None:
+    s = L2Settings(rerank_device="cuda", rerank_device_ids=[0])
+    assert s.rerank_device == "cuda"
+    assert s.rerank_device_ids == [0]
+
+
+def test_rerank_device_rejects_garbage() -> None:
+    with pytest.raises(ValidationError):
+        L2Settings(rerank_device="metal")

@@ -34,6 +34,16 @@ l2_guard_rejects = Counter(
     ["reason"],
     registry=REGISTRY,
 )
+l2_rerank_rejects = Counter(
+    "cradle_l2_rerank_rejects_total",
+    "L2 candidates rejected by the cross-encoder rerank stage",
+    registry=REGISTRY,
+)
+l2_rerank_fail_open = Counter(
+    "cradle_l2_rerank_fail_open_total",
+    "L2 candidates served because rerank was unavailable or errored (fail-open)",
+    registry=REGISTRY,
+)
 upstream_errors = Counter(
     "cradle_upstream_errors_total", "Upstream errors", ["status"], registry=REGISTRY
 )

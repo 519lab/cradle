@@ -60,10 +60,28 @@ def _build_embedder(settings: Settings, override: Embedder | None) -> Embedder |
     )
 
 
+def _build_reranker(settings: Settings, override: object | None):
+    if override is not None:
+        return override
+    if not (settings.features.l2 and settings.features.l2_rerank):
+        return None
+    from cradle.cache.rerank import FastEmbedReranker
+    from cradle.embeddings.fastembed import resolve_cache_dir
+
+    cache_dir = resolve_cache_dir(settings.data_dir)
+    return FastEmbedReranker(
+        model_name=settings.l2.rerank_model,
+        cache_dir=str(cache_dir),
+        cuda=settings.l2.rerank_device == "cuda",
+        device_ids=settings.l2.rerank_device_ids,
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     embedder: Embedder | None = None,
     http: httpx.AsyncClient | None = None,
+    reranker: object | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
 
@@ -101,6 +119,20 @@ def create_app(
 
         _reject_multi_worker(settings)
 
+        # After the cheap startup checks so a misconfigured worker count fails
+        # fast without paying the reranker model load.
+        resolved_reranker = _build_reranker(settings, reranker)
+        if resolved_reranker is not None:
+            # Warm the model once so the first request does not pay init cost. A
+            # warm-up failure must not crash startup: the rerank stage fails open
+            # per-request anyway, so a broken reranker degrades to guard-only L2.
+            try:
+                resolved_reranker.score("ok", "ok")
+                m.ready_gauge.labels(component="reranker").set(1)
+            except Exception:
+                log.exception("reranker warm-up failed; continuing with fail-open rerank")
+                m.ready_gauge.labels(component="reranker").set(0)
+
         embed_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cradle-embed")
         client = http or httpx.AsyncClient(timeout=settings.upstream.timeout_s)
         runtime = Runtime(
@@ -111,6 +143,7 @@ def create_app(
             l1=l1,
             qdrant=qdrant,
             embedder=resolved_embedder,
+            reranker=resolved_reranker,
             l1_ready=l1_ready,
             l2_ready=l2_ready,
             embedder_ready=embedder_ready,

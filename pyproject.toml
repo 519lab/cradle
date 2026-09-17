@@ -23,6 +23,11 @@ dependencies = [
 
 [project.optional-dependencies]
 local-1b = ["llama-cpp-python"]
+# GPU cross-encoder rerank (l2.rerank_device = "cuda"). onnxruntime-gpu REPLACES
+# the CPU onnxruntime pinned in the core deps (they cannot coexist); install with
+# `uv sync --extra rerank-gpu --no-install-package onnxruntime`, or in the GPU
+# image variant. Needs a CUDA host. CPU rerank is the default and needs nothing.
+rerank-gpu = ["onnxruntime-gpu>=1.19"]
 
 [project.scripts]
 cradle = "cradle.__main__:main"
