@@ -76,6 +76,10 @@ l2:
   rerank_model: BAAI/bge-reranker-base
   rerank_threshold: 4.0
   rerank_timeout_s: 2.0
+  # Try the top-K nearest L2 candidates (best-first), serving the first that
+  # survives the guard + rerank. Raises hit rate without lowering the cosine
+  # floor. 1 = only the single nearest neighbor.
+  query_top_k: 5
   rerank_device: cpu
   rerank_device_ids: null
 

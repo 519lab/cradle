@@ -31,3 +31,8 @@ class RequestContext:
     t_reconstruct_s: float = 0.0
     headers: dict[str, str] = field(default_factory=dict)
     upstream_name: str = "default"
+    # Per-request cache directives (enhancement #2), parsed from
+    # X-Cradle-Cache-Control (no-store / no-cache / refresh) and X-Cradle-Cache-TTL.
+    cache_no_read: bool = False   # skip L1/L2 lookup (no-cache / refresh)
+    cache_no_store: bool = False  # skip writeback (no-store)
+    cache_ttl_override: int | None = None

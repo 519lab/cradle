@@ -137,6 +137,33 @@ async def _rerank_ok(runtime: Runtime, query_text: str, candidate_text: str) -> 
     return False, f"reject:{score:.4f}"
 
 
+# finish_reasons that indicate a complete, trustworthy answer worth caching.
+# `length` (truncated), `content_filter` (refused), tool_calls, and empty bodies
+# would otherwise become the permanent cached answer for a prompt and its
+# paraphrases (enhancement #3, write-quality gate).
+_CACHEABLE_FINISH = frozenset({"stop", "eos"})
+
+
+def _effective_ttl(runtime: Runtime, ctx: RequestContext) -> int:
+    ttl = ctx.cache_ttl_override
+    return ttl if ttl is not None else runtime.settings.cache.ttl_s
+
+
+def _response_cache_skip_reason(completion: dict) -> str | None:
+    """Return a skip reason if this response must NOT be cached, else None."""
+    choices = completion.get("choices") or []
+    if not choices:
+        return "no_choices"
+    choice = choices[0]
+    finish = choice.get("finish_reason")
+    if finish not in _CACHEABLE_FINISH:
+        return f"finish_{finish}"
+    content = (choice.get("message") or {}).get("content")
+    if not content or not content.strip():
+        return "empty_content"
+    return None
+
+
 def _observe(ctx: RequestContext) -> None:
     m.inbound_prompt_tokens.inc(ctx.inbound_prompt_tokens)
     m.upstream_prompt_tokens.inc(ctx.upstream_prompt_tokens)
@@ -171,7 +198,8 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
         ctx.layer_hit = "bypass"
         return await _miss(runtime, req, ctx, vec=None)
 
-    if runtime.l1 is not None:
+    # Per-request no-cache/refresh (enhancement #2): skip the read, still write.
+    if runtime.l1 is not None and not ctx.cache_no_read:
         t0 = time.perf_counter()
         rec = await l1mod.get(runtime.l1, l1_key(canonical))
         ctx.t_l1_s = time.perf_counter() - t0
@@ -181,11 +209,15 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             return _replay(req, ctx, rec)
 
     vec: list[float] | None = None
-    if l2_eligible(canonical, req, runtime.settings) and runtime.qdrant is not None:
+    if (
+        not ctx.cache_no_read
+        and l2_eligible(canonical, req, runtime.settings)
+        and runtime.qdrant is not None
+    ):
         vec = await _maybe_embed(runtime, canonical.embed_text, ctx)
         if vec is not None:
             t0 = time.perf_counter()
-            hit = await l2mod.query(
+            candidates = await l2mod.query(
                 runtime.qdrant,
                 runtime.settings,
                 vec,
@@ -201,28 +233,31 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                 ),
             )
             ctx.t_l2_s = time.perf_counter() - t0
-            if hit is not None:
+            # Top-K (enhancement #1): try candidates best-first; serve the first
+            # that survives the guard + rerank. A near-miss at rank 1 no longer
+            # forces a full miss when a true paraphrase sits at rank 2..K.
+            for hit in candidates:
                 ctx.l2_score = hit.score
-                # Stage 2 (issue #5): cheap precision guard. Reject a candidate
-                # whose numbers/negation differ from the query.
+                # Stage 2 (issue #5): cheap precision guard.
                 reason = guard_reason(canonical.embed_text, hit.record.embed_text)
                 if reason is not None:
                     ctx.l2_guard_reason = reason
                     m.l2_guard_rejects.labels(reason=reason).inc()
-                else:
-                    # Stage 3: cross-encoder rerank for entity swaps the guard
-                    # cannot see. Fail-open: an unavailable reranker still serves.
-                    serve, note = await _rerank_ok(
-                        runtime, canonical.embed_text, hit.record.embed_text
+                    continue
+                # Stage 3: cross-encoder rerank for entity swaps the guard cannot
+                # see. Fail-open: an unavailable reranker still serves.
+                serve, note = await _rerank_ok(
+                    runtime, canonical.embed_text, hit.record.embed_text
+                )
+                ctx.l2_rerank_note = note
+                if serve:
+                    ctx.l2_guard_reason = None  # a later candidate cleared the guard
+                    ctx.layer_hit = "l2"
+                    ctx.upstream_prompt_tokens = 0
+                    rec = await promote_l2_hit(
+                        runtime, canonical, hit.record, ctx.inbound_prompt_tokens
                     )
-                    ctx.l2_rerank_note = note
-                    if serve:
-                        ctx.layer_hit = "l2"
-                        ctx.upstream_prompt_tokens = 0
-                        rec = await promote_l2_hit(
-                            runtime, canonical, hit.record, ctx.inbound_prompt_tokens
-                        )
-                        return _replay(req, ctx, rec)
+                    return _replay(req, ctx, rec)
 
     ctx.layer_hit = "miss"
     return await _miss(runtime, req, ctx, vec=vec)
@@ -279,15 +314,21 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
     else:
         out = merge(completion, compressed.template)
     ctx.t_reconstruct_s = time.perf_counter() - t1
-    if ctx.layer_hit != "bypass" and ctx.canonical is not None:
+    ttl = _effective_ttl(runtime, ctx)
+    skip = _response_cache_skip_reason(out)
+    if ctx.cache_no_store or ttl == 0:
+        skip = skip or "no_store"
+    if ctx.layer_hit != "bypass" and ctx.canonical is not None and skip is None:
         rec = record_from(
             ctx.canonical,
             out,
             ctx.inbound_prompt_tokens,
             ctx.upstream_prompt_tokens,
-            runtime.settings.cache.ttl_s,
+            ttl,
         )
         await writeback(runtime, ctx.canonical, vec, rec)
+    elif skip is not None:
+        m.cache_write_skips.labels(reason=skip).inc()
     _observe(ctx)
     return JSONResponse(out, headers=_headers(ctx))
 
@@ -389,15 +430,26 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             ],
             "usage": acc.usage or {},
         }
-        if acc.client_connected and ctx.layer_hit != "bypass" and ctx.canonical is not None:
+        ttl = _effective_ttl(runtime, ctx)
+        skip = _response_cache_skip_reason(completion)
+        if ctx.cache_no_store or ttl == 0:
+            skip = skip or "no_store"
+        if (
+            acc.client_connected
+            and ctx.layer_hit != "bypass"
+            and ctx.canonical is not None
+            and skip is None
+        ):
             rec = record_from(
                 ctx.canonical,
                 completion,
                 ctx.inbound_prompt_tokens,
                 ctx.upstream_prompt_tokens,
-                runtime.settings.cache.ttl_s,
+                ttl,
             )
             await writeback(runtime, ctx.canonical, vec, rec)
+        elif skip is not None:
+            m.cache_write_skips.labels(reason=skip).inc()
         _observe(ctx)
     except asyncio.CancelledError:
         acc.client_connected = False
