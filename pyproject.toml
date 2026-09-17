@@ -39,6 +39,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.5",
     "respx>=0.21",
+    "hypothesis>=6.168.0",
 ]
 
 [build-system]
