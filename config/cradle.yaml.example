@@ -54,7 +54,6 @@ features:
 cache:
   ttl_s: 86400
   max_temperature: 1.0
-  evict_old_pipeline: true
   purge_interval_s: 300
   l1_size_limit_bytes: 1000000000
   # Volatility guard: prompts asking about time-sensitive things ("latest
