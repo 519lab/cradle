@@ -15,7 +15,8 @@ No Redis. No Qdrant server process. No Ollama.
 Point the OpenAI SDK (or any compatible client) at Cradle’s base URL instead of the provider. Keep the same `Authorization` header; Cradle forwards it upstream. No Cradle-issued API key.
 
 ```bash
-cp .env.example .env   # CRADLE_UPSTREAM_BASE_URL if the provider is not on localhost:8080
+cp .env.example .env                       # CRADLE_UPSTREAM_BASE_URL if the provider is not on localhost:8080
+cp config/cradle.yaml.example config/cradle.yaml   # your local config; the real file is gitignored
 uv sync --group dev
 uv run python -m cradle
 ```
@@ -25,7 +26,8 @@ Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0
 ## Docker
 
 ```bash
-cp .env.example .env   # optional CRADLE_UPSTREAM_BASE_URL
+cp .env.example .env                               # optional CRADLE_UPSTREAM_BASE_URL
+cp config/cradle.yaml.example config/cradle.yaml   # your local config; the real file is gitignored
 docker compose up --build
 ```
 

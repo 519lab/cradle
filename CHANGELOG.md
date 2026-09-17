@@ -14,6 +14,7 @@
 ### Changed
 
 - Renamed `compose.yml` to `docker-compose.yml`.
+- `config/cradle.yaml` is now gitignored with `config/cradle.yaml.example` as the tracked template — copy the example to the real filename before running, so local config edits no longer conflict on every `git pull`.
 - Product copy: Cradle is a gateway clients point at, not a local companion app for a model runtime.
 - Default auth is intercept mode: no Cradle API key. Client `Authorization` is forwarded upstream; cache isolation is SHA-256 of that token. Optional `auth.keys` remains an allowlist.
 - Model glob `routes` send a request to a named OpenAI-compatible `upstreams` entry (OpenAI, xAI, llama.cpp, LiteLLM). Unmatched models use `upstream.base_url`.

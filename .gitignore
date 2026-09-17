@@ -13,3 +13,4 @@ data/
 *.onnx
 uv.lock.bak
 .mypy_cache/
+config/cradle.yaml
