@@ -522,7 +522,7 @@ def l2_eligible(
 | GET | `/healthz` | no | `{"status":"ok"}` 200. |
 | GET | `/readyz` | no | 200 if ready components up; 503 otherwise. |
 | GET | `/metrics` | **yes** if `metrics.require_auth: true` (default **true**) | Prometheus text. Same Bearer as chat. Set `require_auth: false` only with loopback bind. |
-| GET | `/v1/models` | yes | Config list, or upstream passthrough. |
+| GET | `/v1/models` | yes | Upstream passthrough when single-backend (no named routes) or `models_passthrough`; else the config list. Falls back to the config list on upstream error. |
 | POST | `/v1/chat/completions` | yes | Below. |
 
 ### `POST /v1/chat/completions`
@@ -975,7 +975,7 @@ Tests (`tests/test_sse.py`): literal `data: [DONE]\n\n` without quotes; **no** `
 - 4xx/5xx: OpenAI error JSON; **no writeback**.
 - Fake upstream: `tests/fake_upstream.py` ASGI + httpx `ASGITransport`. **No live LLM in any PR.**
 
-`GET /v1/models`: passthrough if configured, else `settings.upstream.models`.
+`GET /v1/models`: passthrough when `models_passthrough` is set OR the deploy is single-backend (no named `upstreams`/`routes`), so a fallback-only deploy reflects the real upstream model; else `settings.upstream.models`. On upstream error, falls back to `settings.upstream.models` rather than erroring (clients poll it).
 
 Forward the full dump including extras.
 

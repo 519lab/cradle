@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -8,6 +9,8 @@ import httpx
 
 from cradle.config import Settings, UpstreamSettings
 from cradle.upstream.route import advertised_models
+
+log = logging.getLogger("cradle.upstream")
 
 
 class UpstreamError(Exception):
@@ -97,23 +100,47 @@ async def start_chat_stream(
     return resp
 
 
+def _advertised_list(settings: Settings) -> dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [
+            {"id": m, "object": "model", "owned_by": "cradle"}
+            for m in advertised_models(settings)
+        ],
+    }
+
+
+def _single_fallback_backend(settings: Settings) -> bool:
+    """True when there is exactly one backend: no named upstreams/routes.
+
+    In that case Cradle's `/v1/models` should reflect what the fallback upstream
+    actually serves, rather than the static `upstream.models` placeholder — so a
+    client's model dropdown shows the real model. With named routes present,
+    proxying one backend's `/models` would be ambiguous, so keep the static list.
+    """
+    return not settings.upstreams and not settings.routes
+
+
 async def list_models(
     client: httpx.AsyncClient,
     settings: Settings,
     authorization: str | None = None,
 ) -> dict[str, Any]:
-    if not settings.upstream.models_passthrough:
-        return {
-            "object": "list",
-            "data": [
-                {"id": m, "object": "model", "owned_by": "cradle"}
-                for m in advertised_models(settings)
-            ],
-        }
-    resp = await client.get(
-        _url(settings.upstream, "/models"),
-        headers=_headers(settings.upstream, authorization),
-        timeout=settings.upstream.timeout_s,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    # Passthrough when explicitly requested, OR automatically in single-backend
+    # (fallback-only) deployments so /v1/models reflects the real upstream model.
+    passthrough = settings.upstream.models_passthrough or _single_fallback_backend(settings)
+    if not passthrough:
+        return _advertised_list(settings)
+    try:
+        resp = await client.get(
+            _url(settings.upstream, "/models"),
+            headers=_headers(settings.upstream, authorization),
+            timeout=settings.upstream.timeout_s,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        # /v1/models is polled by clients on every connection check, so a down or
+        # slow upstream must not turn it into a 500 — fall back to the static list.
+        log.warning("upstream /models unavailable; serving advertised model list")
+        return _advertised_list(settings)
