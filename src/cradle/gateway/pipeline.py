@@ -63,6 +63,8 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
         h["X-Cradle-Similarity"] = f"{ctx.l2_score:.6f}"
     if ctx.l2_guard_reason is not None:
         h["X-Cradle-Guard"] = f"reject:{ctx.l2_guard_reason}"
+    if ctx.l2_rerank_note is not None:
+        h["X-Cradle-Rerank"] = ctx.l2_rerank_note
     return h
 
 
@@ -106,6 +108,33 @@ async def _maybe_embed(runtime: Runtime, text: str, ctx: RequestContext) -> list
         m.embed_errors.inc()
         ctx.t_embed_s = time.perf_counter() - t0
         return None
+
+
+async def _rerank_ok(runtime: Runtime, query_text: str, candidate_text: str) -> tuple[bool, str]:
+    """Run the rerank stage in the embed pool with a timeout. Fail-open.
+
+    Returns ``(serve, note)`` where ``note`` is the X-Cradle-Rerank value.
+    A missing reranker, a timeout, or a model error all serve the candidate
+    (it already passed cosine + guard) and are recorded as fail-open.
+    """
+    if runtime.reranker is None:
+        return True, "off"
+    loop = asyncio.get_running_loop()
+    threshold = runtime.settings.l2.rerank_threshold
+    try:
+        score = await asyncio.wait_for(
+            loop.run_in_executor(
+                runtime.embed_pool, runtime.reranker.score, query_text, candidate_text
+            ),
+            timeout=runtime.settings.l2.rerank_timeout_s,
+        )
+    except Exception:  # noqa: BLE001 - fail open on timeout or model error
+        m.l2_rerank_fail_open.inc()
+        return True, "fail-open"
+    if score >= threshold:
+        return True, f"pass:{score:.4f}"
+    m.l2_rerank_rejects.inc()
+    return False, f"reject:{score:.4f}"
 
 
 def _observe(ctx: RequestContext) -> None:
@@ -169,23 +198,27 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             )
             ctx.t_l2_s = time.perf_counter() - t0
             if hit is not None:
-                # Precision guard (issue #5): the cosine gate has recall but no
-                # precision. Reject a candidate whose numbers/negation differ
-                # from the query and fall through to a real upstream miss, which
-                # also writes back a correct entry.
+                ctx.l2_score = hit.score
+                # Stage 2 (issue #5): cheap precision guard. Reject a candidate
+                # whose numbers/negation differ from the query.
                 reason = guard_reason(canonical.embed_text, hit.record.embed_text)
                 if reason is not None:
                     ctx.l2_guard_reason = reason
-                    ctx.l2_score = hit.score
                     m.l2_guard_rejects.labels(reason=reason).inc()
                 else:
-                    ctx.layer_hit = "l2"
-                    ctx.l2_score = hit.score
-                    ctx.upstream_prompt_tokens = 0
-                    rec = await promote_l2_hit(
-                        runtime, canonical, hit.record, ctx.inbound_prompt_tokens
+                    # Stage 3: cross-encoder rerank for entity swaps the guard
+                    # cannot see. Fail-open: an unavailable reranker still serves.
+                    serve, note = await _rerank_ok(
+                        runtime, canonical.embed_text, hit.record.embed_text
                     )
-                    return _replay(req, ctx, rec)
+                    ctx.l2_rerank_note = note
+                    if serve:
+                        ctx.layer_hit = "l2"
+                        ctx.upstream_prompt_tokens = 0
+                        rec = await promote_l2_hit(
+                            runtime, canonical, hit.record, ctx.inbound_prompt_tokens
+                        )
+                        return _replay(req, ctx, rec)
 
     ctx.layer_hit = "miss"
     return await _miss(runtime, req, ctx, vec=vec)

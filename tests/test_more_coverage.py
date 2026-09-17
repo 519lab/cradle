@@ -70,7 +70,9 @@ def test_l2_promote_pipeline(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
-        features=FeatureFlags(cache=True, l2=True, compression=False, reconstruction=False),
+        features=FeatureFlags(
+            cache=True, l2=True, l2_rerank=False, compression=False, reconstruction=False
+        ),
         l2=L2Settings(mode="local"),
         upstream=UpstreamSettings(base_url="http://upstream/v1"),
     )
@@ -245,7 +247,7 @@ def test_multi_worker_refused(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None
     settings = Settings(
         data_dir=tmp_path / "data",
         auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
-        features=FeatureFlags(l2=True, cache=True),
+        features=FeatureFlags(l2=True, l2_rerank=False, cache=True),
         l2=L2Settings(mode="local"),
         upstream=UpstreamSettings(base_url="http://upstream/v1"),
     )

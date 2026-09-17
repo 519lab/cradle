@@ -85,6 +85,10 @@ class FeatureFlags(BaseModel):
     compression: bool = True
     structure: bool = False
     l2: bool = True
+    # Cross-encoder rerank of L2 candidates (issue #5). Default on: it closes the
+    # entity-swap gap the numbers/negation guard cannot. Set false to disable if
+    # the reranker misbehaves; L2 then serves on cosine + guard alone.
+    l2_rerank: bool = True
     reconstruction: bool = True
     local_1b: bool = False
 
@@ -109,6 +113,14 @@ class L2Settings(BaseModel):
     dim: int = 384
     onnx_threads: int | None = None
     points_warn: int = 20_000
+    # Cross-encoder reranker (features.l2_rerank). Threshold is a raw logit from
+    # rerank_model; on BAAI/bge-reranker-base, genuine paraphrases score >= ~4.8
+    # and entity swaps <= ~3.5, so ~4.0 sits in the gap (calibrated on a small
+    # fixture; widen before trusting the exact value). rerank_timeout_s fails
+    # open on expiry.
+    rerank_model: str = "BAAI/bge-reranker-base"
+    rerank_threshold: float = 4.0
+    rerank_timeout_s: float = 2.0
 
     @field_validator("cosine_threshold")
     @classmethod

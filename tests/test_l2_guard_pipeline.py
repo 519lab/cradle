@@ -68,7 +68,7 @@ def l2_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestC
         auth=AuthSettings(keys=[]),
         features=FeatureFlags(
             cache=True, compression=False, structure=False,
-            l2=True, reconstruction=False, local_1b=False,
+            l2=True, l2_rerank=False, reconstruction=False, local_1b=False,
         ),
         upstream=UpstreamSettings(base_url="http://upstream/v1", pass_through_client_auth=True),
     )
