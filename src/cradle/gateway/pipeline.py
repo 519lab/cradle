@@ -100,7 +100,13 @@ def _include_usage(req: ChatRequest) -> bool:
 
 
 def _upstream_payload(req: ChatRequest, messages: list[ChatMessage]) -> dict[str, Any]:
-    payload = req.model_dump(exclude_none=True)
+    # Pass-through contract (issue #26): forward only fields the client actually set,
+    # so Cradle never injects its own sampling defaults (temperature/top_p/penalties/n)
+    # onto a backend that has its own (llama.cpp, vLLM, Ollama). exclude_unset drops
+    # unset defaults; exclude_none keeps the result a strict subset of the old payload
+    # (an explicitly-sent optional null is not re-forwarded). Cradle sets stream_options
+    # deliberately on the wrap path; that is added by the caller, not here.
+    payload = req.model_dump(exclude_unset=True, exclude_none=True)
     payload["messages"] = [m.model_dump(exclude_none=True) for m in messages]
     return payload
 
