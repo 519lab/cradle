@@ -58,3 +58,19 @@ def test_rerank_device_cuda_ok() -> None:
 def test_rerank_device_rejects_garbage() -> None:
     with pytest.raises(ValidationError):
         L2Settings(rerank_device="metal")
+
+
+def test_example_config_validates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tracked config/cradle.yaml.example must load through the real Settings.
+
+    Several sub-configs use extra="forbid", so a key removed from the code (e.g.
+    #27's dead cache.evict_old_pipeline) but left in the example is a hard load
+    failure — the exact drift #36 wants caught in review, not on a box at boot.
+    The example is what operators copy to the (gitignored, bind-mounted) runtime
+    config, so it must always be a valid config for the current code.
+    """
+    example = Path(__file__).resolve().parents[1] / "config" / "cradle.yaml.example"
+    assert example.is_file(), f"tracked example config missing at {example}"
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(example))
+    load_settings()  # raises ValidationError if the example drifts from the schema

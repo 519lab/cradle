@@ -64,7 +64,12 @@ RUN apt-get update \
     && chown -R cradle:cradle /data /opt/cradle
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
-COPY config /app/config
+# Bake ONLY the example config, not a runtime cradle.yaml. The runtime config is
+# bind-mounted from the host at deploy time (compose: `./config:/app/config:ro`),
+# so an edit is a `docker compose restart`, not a rebuild, and no gitignored
+# working-tree cradle.yaml is silently captured at build time (#36). Without a
+# mount, /app/config/cradle.yaml is absent and Cradle runs on code defaults.
+COPY config/cradle.yaml.example /app/config/cradle.yaml.example
 COPY --from=builder --chown=cradle:cradle /opt/cradle/models /opt/cradle/models
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod 755 /app/entrypoint.sh

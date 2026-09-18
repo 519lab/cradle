@@ -66,3 +66,55 @@ is built from real incidents in the CHANGELOG (e.g. #24 empty self-heal, #18 ref
 staleness, wrap-stream usage loss), not hypotheticals. Destructive recovery steps are
 documented but marked as Greg's to run; they are never executed against a live instance to
 "verify" them.
+
+## ADR-0003: Runtime config is bind-mounted, not baked into the image
+
+**Date:** 2026-09-18
+**Status:** Accepted
+**Phase:** Operations
+**Deciders:** Greg
+
+### Context
+
+`config/cradle.yaml` is deliberately gitignored (local edits don't conflict on `git pull`;
+see the CHANGELOG entry that introduced `.example` as the tracked template). But the Docker
+images **also** `COPY config /app/config` and pointed `CRADLE_CONFIG` at the baked copy,
+while compose mounted only the `/data` volume. That combination made a gitignored config a
+build-time artifact, which is the worst of both: (1) editing the host file and restarting
+did nothing — the container read the copy frozen at build time, so a raised body cap sat
+unapplied through two rebuilds on the LAN GPU box (#36, triggered by #34); and (2) `COPY
+config` captured whatever was in the working tree, unreviewed and free to drift from
+`.example` or to still list a key a later code version rejects under `extra="forbid"` —
+crash-looping a box after an upgrade (the #27 shape).
+
+### Decision
+
+Decouple the runtime config from the image build. The compose templates bind-mount the
+`config/` directory read-only (`./config:/app/config:ro`); the images bake **only**
+`cradle.yaml.example`, never a runtime `cradle.yaml`. `CRADLE_CONFIG=/app/config/cradle.yaml`
+is unchanged, so a mounted host file is read and an edit is a `docker compose restart`, not
+a rebuild.
+
+The **directory** is mounted, not the file. The host `config/` dir always exists in a clone
+(`.example` is tracked), so the mount never triggers compose's `create_host_path`; the host
+`config/cradle.yaml` never exists in a fresh clone, so mounting *it* would auto-create it as
+an empty directory and silently break config loading. With no host file present, Cradle
+falls back to the built-in pydantic defaults — byte-identical to the pre-existing
+"missing config → defaults" behavior.
+
+### Rationale
+
+This is not a reversal of the gitignore decision — the "copy the example, edit locally"
+workflow is kept intact. It removes the *second* coupling (config → image) that made an
+edit require a rebuild and made drift invisible. Directory-over-file is the specific choice
+that keeps the graceful-fallback requirement while eliminating the empty-directory footgun.
+A CI drift guard (`test_example_config_validates`) loads the tracked `.example` through the
+real settings class, so a removed key surfaces in review, not at an operator's boot.
+
+### Consequences
+
+A config change is a restart. Deploys must copy a compose template to the gitignored
+`docker-compose.yml` **after** this change to pick up the new `volumes:` mount — the fix is
+in the image only if the running compose file has the mount. The bake reversal is partial:
+models and the example config are still baked (self-contained image), only the runtime
+config is externalized. Verified end-to-end on the CPU image (see RUNBOOK.md §1.1/§7.1).

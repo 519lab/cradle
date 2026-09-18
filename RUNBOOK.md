@@ -16,7 +16,14 @@ does not exercise them, and the destructive resets must not be run against a liv
 to "verify" them. Drive those against a throwaway instance before relying on them, and
 update this line. **§1.4 (GPU rerank)** was verified on 2026-09-18 on an RTX 4080 host
 (driver CUDA 13.4): the GPU image starts with CUDA assigned, no `libcuda.so.1` /
-`Failed to create CUDAExecutionProvider` in the logs.*
+`Failed to create CUDAExecutionProvider` in the logs. **§1.1/§7.1 config bind-mount**
+(#36) was verified on 2026-09-18 against the **CPU** image (a `BAKE_EMBEDDINGS=0`,
+L2-off build, so no reranker download): an edit to the host `config/cradle.yaml` takes
+effect on `docker compose restart` with no rebuild (`pipeline_version` change reflected
+in `/probe`); a `#27`-shape dead key crashes config load on restart and is recovered by
+removing it; and a fresh-clone `up` (no host `cradle.yaml`) comes up healthy on defaults
+without compose auto-creating a `config/cradle.yaml` directory. The GPU image's identical
+mount was not re-driven (only the compose file is validated for it).*
 
 > **Keeping this current is not optional.** Any change touching a config key, an env
 > var, a metric name, a health/readiness condition, a capacity limit, or a per-request
@@ -66,6 +73,15 @@ docker compose up --build
 - `config/cradle.yaml` is **gitignored**; a fresh clone has no `config/cradle.yaml`,
   only `.example`. Missing it means Cradle falls back to `CRADLE_CONFIG=config/cradle.yaml`
   and the pydantic defaults. Copy the example first.
+- **The runtime config is bind-mounted, not baked into the image** (#36). The compose
+  templates mount the whole `./config` dir read-only into the container
+  (`./config:/app/config:ro`); `CRADLE_CONFIG=/app/config/cradle.yaml` then reads the
+  host file. So a config edit takes effect on `docker compose restart cradle` — **no
+  rebuild** (see §7.1). The image bakes only `cradle.yaml.example`, never a runtime
+  `cradle.yaml`, so nothing from your working tree is silently captured at build time.
+  The dir (always present in a clone) is mounted rather than the file (absent in a fresh
+  clone, which would make compose auto-create it as an empty directory) — with no host
+  file, `/app/config/cradle.yaml` is absent and Cradle runs on the pydantic defaults.
 - Compose reaches a host-side upstream via `host.docker.internal` (default
   `http://host.docker.internal:8080/v1`). Override with `CRADLE_UPSTREAM_BASE_URL`.
 - L1/L2 state is the `cradle-data` named volume mounted at `/data`. It is **not**
@@ -395,6 +411,31 @@ docker compose restart cradle    # keeps the cradle-data volume (L1/L2 survive)
 
 In-flight verified-L2 audits are drained (bounded, ~30 s) at shutdown so their
 observations land; the purge loop is cancelled; L1/Qdrant are closed cleanly.
+
+**Change a config value (no rebuild).** `config/cradle.yaml` is bind-mounted read-only
+into the container (§1.1), so an edit is a restart, not a rebuild:
+
+```bash
+$EDITOR config/cradle.yaml        # edit the HOST file
+docker compose restart cradle     # container re-reads it; L1/L2 survive
+```
+
+Verify the new value took with a probe (no upstream call), e.g. after a
+`pipeline_version` change:
+
+```bash
+curl -s -H 'X-Cradle-Cache-Control: probe' -H 'Content-Type: application/json' \
+  -d '{"model":"m","messages":[{"role":"user","content":"x"}]}' \
+  localhost:8000/v1/chat/completions | jq .pipeline_version
+```
+
+A key the running code does not know (e.g. a value left over after an upgrade removed
+it, like #27's `cache.evict_old_pipeline`) makes config load fail on restart — Cradle
+uses `extra="forbid"` on its sub-configs. The container will not become ready and the
+log shows `Extra inputs are not permitted`; remove the offending line and restart. (An
+edit to `docker-compose.yml` itself — including the `volumes:` mount — still needs
+`docker compose up -d`, not just `restart`; only the mounted config file is re-read on a
+bare restart.)
 
 ### 7.2 Invalidate the whole cache the *safe* way — bump `pipeline_version`
 
