@@ -75,6 +75,34 @@ async def completions(request: Request):
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
                 return
+            if model == "tools-plain-stream":
+                # A tools request the model answers in TEXT (no tool call) — the
+                # #43 cacheable case. Emits plain content despite tools present.
+                for delta, fin in (({"role": "assistant"}, None), ({"content": "ACK"}, None), ({}, "stop")):
+                    ch = {"id": "chatcmpl-fake", "object": "chat.completion.chunk",
+                          "created": 1, "model": model,
+                          "choices": [{"index": 0, "delta": delta, "finish_reason": fin}]}
+                    yield f"data: {json.dumps(ch)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            if model == "tools-mixed-stream":
+                # Adversarial (#43): real content AND a tool_call delta, finishing
+                # with stop. Must NOT be cached — proves detection isn't just the
+                # finish-reason gate.
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"content":"here"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"x","arguments":"{}"}}]},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})}\n\n'
+                yield "data: [DONE]\n\n"
+                return
+            if model == "reasoning-stream":
+                # A delta field outside {role,content,tool_calls} (#43 allowlist):
+                # reaches the client but can't be replayed from cache → not cached.
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"reasoning":"thinking..."},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]})}\n\n'
+                yield "data: [DONE]\n\n"
+                return
             if body.get("tools"):
                 role = {
                     "id": "chatcmpl-fake",

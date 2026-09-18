@@ -205,15 +205,16 @@ def test_bypass_json_path_logs_a_line(make_client, auth_header, caplog):
 
 
 def test_streaming_bypass_logs_line_without_completion(make_client, auth_header, caplog):
-    # stream + tools is uncacheable -> _passthrough_bytes, which tees bytes
+    # stream + logprobs stays a true bypass -> _passthrough_bytes, which tees bytes
     # verbatim and never parses a completion, so it logs with completion=None.
+    # (stream + tools is no longer bypass since #43 — it's the cacheable passthrough.)
     client = make_client(LoggingSettings(content="prompts_and_completions"))
     with caplog.at_level(logging.INFO, logger="cradle.request"):
         r = client.post(
             "/v1/chat/completions",
             headers=auth_header,
             json={"model": "gpt-4o-mini", "temperature": 0, "stream": True,
-                  "tools": [{"type": "function", "function": {"name": "x", "parameters": {}}}],
+                  "logprobs": True,
                   "messages": [{"role": "user", "content": PROMPT_MARKER}]},
         )
         r.read()

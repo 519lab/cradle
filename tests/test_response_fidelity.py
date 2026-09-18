@@ -119,11 +119,12 @@ def test_wrap_stream_forwards_real_upstream_error(
     assert b"data: [DONE]\n\n" in r.content
 
 
-def test_bypass_stream_payload_untouched(
+def test_tool_stream_payload_untouched(
     client: TestClient, auth_header: dict[str, str]
 ) -> None:
-    """The usage injection must never perturb the byte-exact bypass passthrough.
-    A tools stream is bypass; upstream must not see an injected include_usage."""
+    """include_usage must never be injected on the tool-stream passthrough-cache
+    path (#43): like bypass, the client's stream stays verbatim. A tools stream is
+    now MISS (cacheable passthrough), not BYPASS, but the fidelity contract holds."""
     r = client.post(
         "/v1/chat/completions",
         headers=auth_header,
@@ -131,13 +132,13 @@ def test_bypass_stream_payload_untouched(
             "model": "gpt-4o-mini",
             "stream": True,
             "tools": [{"type": "function", "function": {"name": "x", "parameters": {}}}],
-            "messages": [{"role": "user", "content": "bypass-untouched-1"}],
+            "messages": [{"role": "user", "content": "tool-stream-untouched-1"}],
         },
     )
     assert r.status_code == 200
-    assert r.headers["X-Cradle-Cache"] == "BYPASS"
-    # The fake upstream only emits a usage chunk when it received include_usage; a
-    # bypass tools stream must not, proving the payload reached upstream unmodified.
+    assert r.headers["X-Cradle-Cache"] == "MISS"
+    # The fake upstream only emits a usage chunk when it received include_usage; the
+    # tool-stream path must not inject it, proving the payload reached upstream clean.
     assert _usage_frames(_sse_objects(r.content)) == []
     assert b"tool_calls" in r.content
 
@@ -168,10 +169,11 @@ def test_error_forwards_ratelimit_headers(
     assert r.headers["content-length"] != "999"
 
 
-def test_bypass_stream_forwards_ratelimit_headers(
+def test_tool_stream_forwards_ratelimit_headers(
     client: TestClient, auth_header: dict[str, str]
 ) -> None:
-    """A 200 bypass passthrough carries the allowlisted upstream quota headers."""
+    """The tool-stream passthrough-cache path (#43, now MISS) still relays the
+    allowlisted upstream quota headers, like the bypass passthrough does."""
     r = client.post(
         "/v1/chat/completions",
         headers=auth_header,
@@ -179,10 +181,10 @@ def test_bypass_stream_forwards_ratelimit_headers(
             "model": "gpt-4o-mini",
             "stream": True,
             "tools": [{"type": "function", "function": {"name": "x", "parameters": {}}}],
-            "messages": [{"role": "user", "content": "bypass-headers-1"}],
+            "messages": [{"role": "user", "content": "tool-stream-headers-1"}],
         },
     )
     assert r.status_code == 200
-    assert r.headers["X-Cradle-Cache"] == "BYPASS"
+    assert r.headers["X-Cradle-Cache"] == "MISS"
     assert r.headers["x-ratelimit-remaining-requests"] == "5"
     assert r.headers["x-cradle-upstream-request-id"] == "req_bypass_1"

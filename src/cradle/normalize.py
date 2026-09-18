@@ -250,7 +250,14 @@ def is_cacheable(canonical: CanonicalRequest, req: ChatRequest, settings: Settin
         return False
     if has_non_text_parts(req.messages):
         return False
-    if req.stream and (canonical.has_tools or req.logprobs):
+    if req.stream and req.logprobs:
+        # Cached logprobs would be wrong on replay — always bypass.
+        return False
+    if req.stream and canonical.has_tools and not settings.cache.cache_tool_streams:
+        # Tool-enabled streams bypass unless the passthrough-cache path is enabled
+        # (#43). When enabled they are cacheable: teed verbatim, cached only if the
+        # response carries no tool call. The pipeline routes them via
+        # ctx.cacheable_passthrough_stream, not the tool-call-incapable wrap path.
         return False
     return True
 

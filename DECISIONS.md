@@ -235,3 +235,65 @@ system prompt — shorter lines, and less prompt PII when `logging.content`/`aud
 A separate, pre-existing eval finding surfaced while proving this (three `l2_pairs.jsonl` hit pairs
 fall below the 0.90 floor with real bge) is tracked independently; it is the inverse failure —
 false negatives at the threshold, not #40's false positives.
+
+## ADR-0006: Tool-enabled streams are cacheable via verbatim tee + post-stream decision
+
+**Date:** 2026-09-18
+**Status:** Accepted
+**Phase:** Performance / Correctness
+**Deciders:** Greg
+
+### Context
+
+Measurement showed Cradle's dominant real traffic — Open-WebUI chat turns, which carry `tools`
+and `stream:true` — was **100% BYPASS**: not cached, full upstream cost every time. Only
+Open-WebUI's internal task calls (title/tags/follow-ups, no tools) benefited. Cause:
+`is_cacheable` rejected `stream and (has_tools or logprobs)` up front, because the streaming
+**wrap path** (`_wrap_stream`) rebuilds the outbound stream as content-only frames and cannot
+carry a tool-call response. Non-streaming tool requests were already cached (text answers only;
+`cache_skip_reason` refuses `finish_tool_calls`), so only the streaming variant was excluded.
+
+Greg asked whether caching a text answer to a tool-enabled request is even correct — a valid
+concern: if the model answers in text when it should have called a tool, a cached replay
+suppresses the tool. Measured live: the model's answer-vs-call routing is largely deterministic
+per prompt, and the **volatility guard already refuses to cache** the dangerous cases
+(time/date/weather/"latest"), so the risk overlap is contained for the common shapes. The
+residual gap is a stateful tool with no time-word (balance/inventory), accepted under a flag.
+
+### Decision
+
+Add a third streaming path, `_passthrough_cache_stream`, gated by `cache.cache_tool_streams`
+(default **on**). It tees upstream bytes to the client **verbatim** (like bypass — a tool call
+relays intact) while feeding a **copy** through a bounded line-buffer into `parse_and_accumulate`.
+After the stream, it caches the response **only** when a fail-closed allowlist passes: parsed
+terminal `finish_reason in {stop, eos}`, no error, no tool call, no delta key outside
+`{role, content, tool_calls}` (subsumes legacy `function_call`, refusal, reasoning, …), no
+unparseable framing, client still connected, and `cache_skip_reason` clean. The cached body is
+the **`merge()`-reconstructed** representation the JSON path stores (JSON and streaming share a
+cache key — `stream` is excluded from `hash_input` — so cross-mode replay must match). No
+`include_usage` injection: the client stream stays verbatim, and `usage: acc.usage or {}` is
+cached (`synthesize_sse` omits the usage frame on empty usage). `layer_hit` stays `"miss"`; a
+separate `ctx.cacheable_passthrough_stream` flag carries the wire strategy (cache outcome and
+transport are orthogonal — a new `layer_hit` value would disturb 18 read sites). `logprobs`
+streams still bypass.
+
+### Rationale
+
+Verbatim-to-the-client makes the tool-call case impossible to corrupt: the client always gets
+exactly the upstream bytes, and a parse failure only disables *caching*, never the stream.
+Fail-closed-by-allowlist means a future provider delta shape defaults to "don't cache" rather
+than silently dropping fields on replay. Reconstructed-not-raw keeps JSON and stream entries
+interchangeable under their shared key (a real cross-mode bug caught in review). Design reviewed
+by codex (read-only) + a stronger advisor; both found holes in the first draft (raw-vs-merge
+representation, not-fail-closed gate, an `include_usage` injection that would have broken
+`test_bypass_stream_payload_untouched`).
+
+### Consequences
+
+Cradle's chat path is cacheable for the first time (measured 0% → the L1 tier of non-streaming
+tool requests). `cache.cache_tool_streams: false` restores the old always-bypass behavior without
+a redeploy. Accepted product risk, stated plainly: the volatility guard is a regex over user text
+and does not inspect tool semantics, so a stateful tool with no time-word can serve a stale
+cached text answer under the flag. `sse.py` gained a `cache_disabled` accumulator flag; the wrap
+path ignores it (it has its own tool_call abort). No new `pipeline_version` bump — this only adds
+newly-cacheable entries; it does not change how existing entries are keyed or read.

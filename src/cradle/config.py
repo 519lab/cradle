@@ -111,6 +111,16 @@ class CacheSettings(BaseModel):
     # client X-Cradle-Cache-TTL always wins over the guard.
     volatility_guard: bool = True
     volatile_ttl_s: int = 300
+    # Cache tool-enabled STREAMING requests (#43). Without this, a stream+tools
+    # request bypasses the cache entirely (the wrap path cannot carry a tool
+    # call). With it, such a request is teed verbatim to the client while a copy
+    # is accumulated; if the response contains NO tool call it is cached (same
+    # representation as the JSON path), otherwise nothing is cached. Non-stream
+    # tool requests are cached regardless (unaffected). Default on. NOTE: the
+    # volatility guard is a regex over user text and does not inspect tool
+    # semantics, so a stateful tool with no time-word ("what's my balance") can
+    # serve a stale cached answer under this flag; set false to disable.
+    cache_tool_streams: bool = True
 
     @field_validator("volatile_ttl_s")
     @classmethod

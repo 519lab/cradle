@@ -66,6 +66,13 @@ def usage_frame(
 # unlike `id`/`created`, which are deliberately local, these carry upstream truth the
 # caller may need (e.g. `system_fingerprint` for reproducibility audits).
 PASS_THROUGH_TOP_FIELDS = ("system_fingerprint", "service_tier")
+# Delta fields the content-only cache representation can faithfully replay (#43).
+# A streaming delta carrying anything else (legacy function_call, refusal,
+# reasoning, annotations, audio, …) would reach the live client but disappear on
+# a cache HIT, so it disables caching for that response. `tool_calls` is here so
+# it doesn't trip the allowlist on its own — it is gated separately via
+# tool_call_seen (a tool-call response is never cached anyway).
+_CACHEABLE_DELTA_KEYS = frozenset({"role", "content", "tool_calls"})
 # `id`/`created` are deliberately local on the wrap path (DESIGN.md wrap contract);
 # they must never be forwarded, so they must never enter the pass-through allowlist.
 assert not ({"id", "created", "object"} & set(PASS_THROUGH_TOP_FIELDS))
@@ -96,6 +103,13 @@ class StreamAccumulator:
     error: bool = False
     error_payload: dict[str, Any] | None = None
     tool_call_seen: bool = False
+    # Fail-closed cache gate for the tool-stream passthrough path (#43). Set when
+    # a chunk carries anything the content-only cache representation cannot
+    # faithfully replay: a delta key outside {role, content}, a legacy
+    # function_call, or an unparseable/non-object payload. The passthrough path
+    # refuses to cache when this is set; the wrap path ignores it (it has its own
+    # tool_call_seen abort). Purely additive — never affects what is teed.
+    cache_disabled: bool = False
     client_connected: bool = True
     # Provider-set top-level fields (system_fingerprint, service_tier) seen on any
     # chunk, forwarded to the caller and stored so cached replays match live streams.
@@ -121,8 +135,14 @@ def parse_and_accumulate(line: str, acc: StreamAccumulator) -> str | None:
     try:
         obj = json.loads(payload)
     except json.JSONDecodeError:
+        # Unparseable frame: content teed verbatim is fine, but we can no longer
+        # trust the accumulated body, so refuse to cache (fail-closed, #43).
+        acc.cache_disabled = True
         return None
-    if isinstance(obj, dict) and obj.get("error"):
+    if not isinstance(obj, dict):
+        acc.cache_disabled = True
+        return None
+    if obj.get("error"):
         acc.error = True
         err = obj["error"]
         acc.error_payload = err if isinstance(err, dict) else {"message": str(err)}
@@ -142,6 +162,15 @@ def parse_and_accumulate(line: str, acc: StreamAccumulator) -> str | None:
         acc.finish_reason = finish
     if delta.get("tool_calls"):
         acc.tool_call_seen = True
+    # Allowlist for the content-only cache representation (#43): any delta field
+    # beyond role/content/tool_calls (legacy function_call, refusal, reasoning,
+    # annotations, audio, …) would reach the MISS client but vanish on a HIT
+    # replay, so it disables caching. tool_calls is covered by tool_call_seen.
+    if isinstance(delta, dict):
+        for k in delta:
+            if k not in _CACHEABLE_DELTA_KEYS:
+                acc.cache_disabled = True
+                break
     if isinstance(obj.get("usage"), dict):
         acc.usage = obj["usage"]
     content = delta.get("content")

@@ -227,6 +227,11 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
         if ctx.cache_probe:
             return _probe(ctx, l1_key=None, l2_eligible=False)
         return await _miss(runtime, req, ctx, vec=None)
+    # A cacheable stream+tools request (#43) is a normal miss whose miss path must
+    # tee verbatim (the wrap path cannot carry a tool call). Flag the wire strategy;
+    # layer_hit stays "miss". An L1 hit still replays normally (content-only).
+    if req.stream and canonical.has_tools:
+        ctx.cacheable_passthrough_stream = True
     _apply_volatility_guard(runtime, ctx)
 
     key = l1_key(canonical)
@@ -389,12 +394,16 @@ async def _miss(
     _name, target = resolve_upstream(runtime.settings, req.model)
     ctx.upstream_name = _name
     if req.stream:
-        # On the wrap path Cradle rebuilds the outbound stream and caches the result,
+        # On the WRAP path Cradle rebuilds the outbound stream and caches the result,
         # so it must know the real token usage even when the client did not request it
         # (otherwise the record stores empty usage and every later include_usage hit
-        # replays {}). Ask upstream for the usage chunk. Never touch the bypass payload:
-        # that path is a byte-exact passthrough and must stay verbatim.
-        if ctx.layer_hit != "bypass":
+        # replays {}). Ask upstream for the usage chunk. Do NOT touch the payload on
+        # the bypass path (byte-exact passthrough) NOR the tool-stream passthrough-cache
+        # path (#43): both tee the client verbatim, so injecting stream_options would
+        # surface an unsolicited usage frame and can 400 backends that lack it. The
+        # passthrough-cache path caches usage: acc.usage or {} — synthesize_sse omits
+        # the usage frame on empty usage, so an empty-usage record replays cleanly.
+        if ctx.layer_hit != "bypass" and not ctx.cacheable_passthrough_stream:
             payload["stream_options"] = {
                 **(payload.get("stream_options") or {}),
                 "include_usage": True,
@@ -471,6 +480,20 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
             media_type="text/event-stream",
             headers=headers,
         )
+    if ctx.cacheable_passthrough_stream:
+        # Tool-enabled stream (#43): tee verbatim like bypass (so a tool call relays
+        # intact) but accumulate a copy and cache a no-tool-call response afterward.
+        headers.update(forwardable_headers(resp.headers))
+        acc = StreamAccumulator(
+            outbound_id=f"chatcmpl-{uuid.uuid4().hex}",
+            outbound_created=int(time.time()),
+            model=req.model,
+        )
+        return StreamingResponse(
+            _passthrough_cache_stream(runtime, req, ctx, vec, compressed, resp, acc),
+            media_type="text/event-stream",
+            headers=headers,
+        )
     outbound_id = f"chatcmpl-{uuid.uuid4().hex}"
     outbound_created = int(time.time())
     acc = StreamAccumulator(
@@ -495,6 +518,110 @@ async def _passthrough_bytes(runtime: Runtime, resp, ctx: RequestContext) -> Asy
         raise
     finally:
         await resp.aclose()
+
+
+# Cap the line-accumulation buffer for the passthrough-cache path. A single SSE
+# frame far larger than this is treated as unparseable → caching disabled (the
+# client still gets every byte). 4 MiB is generous for a chat completion frame.
+_PASSTHROUGH_LINE_BUF_MAX = 4 * 1024 * 1024
+
+
+async def _passthrough_cache_stream(
+    runtime: Runtime, req, ctx, vec, compressed, resp, acc: StreamAccumulator
+) -> AsyncIterator[bytes]:
+    """Tool-enabled stream (#43): tee upstream bytes to the client VERBATIM while
+    accumulating a copy; cache only a clean, no-tool-call response afterward.
+
+    The client's bytes are never derived from parsing — any accumulation failure
+    only disables caching (acc.cache_disabled), never the stream.
+    """
+    buf = ""
+    try:
+        async for chunk in resp.aiter_bytes():
+            yield chunk  # verbatim to the client, always
+            if acc.cache_disabled:
+                continue  # already un-cacheable; keep teeing, skip parsing
+            try:
+                buf += chunk.decode("utf-8")
+            except UnicodeDecodeError:
+                # A byte boundary split a codepoint, or non-UTF-8: we can't safely
+                # reassemble lines, so stop trusting the accumulation.
+                acc.cache_disabled = True
+                continue
+            if len(buf) > _PASSTHROUGH_LINE_BUF_MAX:
+                acc.cache_disabled = True
+                buf = ""
+                continue
+            # Consume only complete lines; keep the trailing partial in buf.
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                try:
+                    parse_and_accumulate(line, acc)
+                except Exception:  # noqa: BLE001 - aux parsing must never kill the stream
+                    acc.cache_disabled = True
+        # Stream ended. Consider caching iff everything is clean.
+        _observe(ctx)
+        await _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc)
+    except asyncio.CancelledError:
+        acc.client_connected = False
+        log_request(runtime.settings, ctx, None, disconnected=True)
+        raise
+    except GeneratorExit:
+        acc.client_connected = False
+        log_request(runtime.settings, ctx, None, disconnected=True)
+        raise
+    finally:
+        await resp.aclose()
+
+
+async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: StreamAccumulator) -> None:
+    """Fail-closed writeback for the passthrough-cache path (#43)."""
+    # Reconstruct the SAME representation the JSON miss path caches (merge()):
+    # JSON and streaming share a cache key (stream is excluded from hash_input),
+    # so a cross-mode hit must return an identical body.
+    body = wrap_content(compressed.template, acc.content)
+    usage = acc.usage or {}
+    ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
+    completion = {
+        "id": acc.outbound_id,
+        "object": "chat.completion",
+        "created": acc.outbound_created,
+        "model": req.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": body},
+                "finish_reason": acc.finish_reason,
+            }
+        ],
+        "usage": usage,
+        **acc.extra_top,
+    }
+    ttl = _effective_ttl(runtime, ctx)
+    # Fail-closed gate: every condition must hold, or we cache nothing.
+    skip = cache_skip_reason(completion)
+    if ctx.cache_no_store or ttl == 0:
+        skip = skip or "no_store"
+    if acc.tool_call_seen:
+        skip = skip or "tool_call"
+    if acc.error:
+        skip = skip or "upstream_error"
+    if acc.cache_disabled:
+        skip = skip or "unsupported_stream"
+    if not acc.saw_done:
+        skip = skip or "incomplete_stream"
+    if acc.client_connected and ctx.canonical is not None and skip is None:
+        rec = record_from(
+            ctx.canonical,
+            completion,
+            ctx.inbound_prompt_tokens,
+            ctx.upstream_prompt_tokens,
+            ttl,
+        )
+        await writeback(runtime, ctx.canonical, vec, rec)
+    elif skip is not None:
+        m.cache_write_skips.labels(reason=skip).inc()
+    log_request(runtime.settings, ctx, completion if skip is None else None)
 
 
 async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccumulator) -> AsyncIterator[bytes]:
