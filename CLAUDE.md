@@ -40,6 +40,12 @@ Noisy CI latency gate:
 CRADLE_SKIP_LATENCY=1 uv run pytest
 ```
 
+Live end-to-end measurement battery (`tests/e2e/battery.py`) — a standalone diagnostic driver, **not** part of the pytest suite (no `test_` names; `tests/e2e/` collects zero tests). It drives realistic Open-WebUI-shaped traffic against a *running* Cradle and reports hit rate, bypass rate (reason inferred from request shape — Cradle exposes no bypass-reason header), and compression savings (measured only on non-stream `no-store, no-cache` fresh misses, since streaming responses drop `X-Cradle-Upstream-Tokens` and `no-store` alone would serve a warm turn from cache). It runs a preflight that aborts if `features.cache` is off and reports the live `cache_tool_streams` (#43/#44) behaviour. Makes real upstream calls:
+
+```bash
+uv run python tests/e2e/battery.py --base http://192.168.50.30:8000 [--json out.json]
+```
+
 Default config: `config/cradle.yaml` (gitignored; copy `config/cradle.yaml.example`). Under Docker it is **bind-mounted read-only** (`./config:/app/config:ro`), not baked into the image — a config edit is a `docker compose restart cradle`, not a rebuild; the image bakes only `cradle.yaml.example`, and with no host file Cradle runs on code defaults (#36). Override the fallback upstream with `CRADLE_UPSTREAM_BASE_URL`. Named backends live under `upstreams:` with `routes:` (`fnmatch` on `model`). Proxy listen is `127.0.0.1:8000`. Default is intercept mode: no Cradle API key; client `Authorization` is forwarded and used as the cache tenant. Optional `auth.keys` is an allowlist. OpenAI-compatible clients only; Claude Code’s Anthropic `/v1/messages` is not implemented.
 
 Per-request cache directives come from `X-Cradle-Cache-Control` (`no-store`, `no-cache`/`refresh`, `probe`) and `X-Cradle-Cache-TTL`. `probe` is a dry run: it returns a `cradle.probe` JSON explanation of the L1/L2/guard/rerank decision and never writes or calls upstream (`src/cradle/gateway/probe.py`).
