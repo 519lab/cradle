@@ -1074,7 +1074,7 @@ Cache `Encoding` objects per name. Golden-suite ≥40% **must** use this functio
 server:
   host: 127.0.0.1
   port: 8000                      # Cradle listen; upstream default is :8080
-  max_body_bytes: 1048576
+  max_body_bytes: 134217728       # 128 MiB (fits 1M-token + multimodal bodies)
 
 data_dir: ./data
 
@@ -1192,7 +1192,7 @@ Dev: `pytest`, `pytest-cov`, `pytest-asyncio`, `ruff`, `respx`. Optional extra `
 | Timing auth oracle | Medium | `hmac.compare_digest`; dummy work on missing header. |
 | Prompt at rest | Medium | `data_dir` mode 0700. No encryption-at-rest (edge trust boundary). |
 | SSRF | Medium | `upstream.base_url` config-only. |
-| Over-large body | Low | 1 MiB. |
+| Over-large body | Low | `max_body_bytes` **128 MiB** default (#34). Sized for real LLM traffic: a 1M-token text prompt is ~4-6 MB, but inline base64 images dominate at ~30-45 MB for a handful of photos — 128 MiB clears both with margin while still rejecting gigabyte-scale abuse. A lower cap would 413 requests the upstream would accept. Enforced by a `Content-Length` pre-check (reject before buffering) plus a post-read backstop for chunked/lying headers. **Residual:** a chunked body with no `Content-Length` is still fully buffered before the backstop fires — bound it with a reverse proxy (`client_max_body_size`) in front. |
 | Metrics scrape | Medium | `metrics.require_auth: true` default. Compose publishing `0.0.0.0:8000` still requires Bearer. Loopback-only scrapers may set `require_auth: false`. |
 | False semantic hit | High | 0.90 default, 0.85 clamp, sampling filters, L2 off for tools/multi-turn, embed pair eval. |
 
