@@ -335,6 +335,41 @@ because a protected span blocked it).
 - `rate(cradle_upstream_errors_total{status=~"5.."}[5m])` elevated — upstream trouble.
 - `/readyz` != 200 — pull the instance from the LB.
 
+### 4.4 Request logs (`logging.*`, ADR-0004)
+
+Cradle emits one structured line per request on the `cradle.request` logger, alongside
+uvicorn's access log. Two independent config axes control it (`logging:` section, or
+`CRADLE_LOGGING__LEVEL` / `CRADLE_LOGGING__CONTENT` / `CRADLE_LOGGING__FORMAT` /
+`CRADLE_LOGGING__MAX_TEXT_CHARS` env vars):
+
+| Key | Values (default) | Effect |
+|---|---|---|
+| `logging.level` | `DEBUG`/`INFO`/`WARNING`/… (`INFO`) | `INFO` = one request line each. `DEBUG` = also one line per rejected L2 candidate (`guard` / `rerank` / `audit-floor`), carrying the candidate key + score. |
+| `logging.content` | `none` / `prompts` / `prompts_and_completions` (`none`) | Whether prompt/response **text** appears. `none` logs keys, hashes, decision, scores, timings only. **Above `none` writes PII to the logs.** |
+| `logging.format` | `text` / `json` (`text`) | `text` = human-readable `key=value`; `json` = one JSON object per line for an aggregator. |
+| `logging.max_text_chars` | int (`2000`) | Truncation ceiling for any logged prompt/response text. |
+
+At `prompts_and_completions`, a JSON bypass (`n=2` etc.) logs the response text, but a streaming
+bypass (`stream`+`tools`) does not — the verbatim passthrough never parses a body, so it has no
+`completion` to log.
+
+The default `content: none` line carries: `request_id`, `cache` (`l1`/`l2`/`miss`/`bypass`),
+`upstream`, `model`, `tenant` (token hash), `key` (cache key hash), `sim`, `guard`, `rerank`,
+`volatile`, `audit`, the `t_*` stage timings, and inbound/upstream token counts — enough to
+answer "what did Cradle decide?" without any prompt text. An **upstream error** (429/5xx) still
+logs a line, carrying `status` (what Cradle returned) and `upstream_status` (what the backend
+returned). A client that disconnects mid-stream logs a line with `disconnected=true`. Two
+failure paths log their traceback at WARNING: an embed failure (`embed failed … L2 read
+skipped`) and a rerank fail-open.
+
+Cradle sets `propagate=False` on the `cradle` logger, so `cradle.*` lines go only to Cradle's
+own handler, not the root logger — a consumer that previously captured `cradle.*` through a
+root handler must attach to the `cradle` logger instead.
+
+> **Do not run production with `content` above `none`** unless the log sink is trusted for PII —
+> it dumps prompt (and, at `prompts_and_completions`, response) text. It is a debugging tool for
+> a scratch instance, the request-path analogue of `l2.audit_log_text`.
+
 ---
 
 ## 5. Troubleshooting (symptom → check → cause → action)

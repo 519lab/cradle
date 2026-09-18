@@ -237,6 +237,58 @@ class MetricsSettings(BaseModel):
     require_auth: bool = True
 
 
+class LoggingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Two independent axes (logging_setup.py). `level` is how much detail:
+    # INFO gives one request-completion line; DEBUG adds per-candidate
+    # guard/rerank/audit-floor rejection lines. `content` is how sensitive:
+    # "none" logs only keys, hashes, scores and timings; "prompts" adds the
+    # request text; "prompts_and_completions" adds the response text too.
+    # content != "none" writes PROMPT/RESPONSE TEXT (PII) to the logs — off by
+    # default on purpose (the request-path analogue of l2.audit_log_text).
+    level: str = "INFO"
+    content: str = "none"
+    # Default "text": one human-readable key=value line per request for a
+    # person watching stdout. "json" emits a compact JSON object per line for a
+    # log aggregator to parse.
+    format: str = "text"
+    # Truncation ceiling for any logged prompt/response text. max_body_bytes is
+    # 128 MiB, so an inline-base64 multimodal prompt or a long completion would
+    # otherwise produce an unreadable line and unbounded log growth.
+    max_text_chars: int = 2000
+
+    @field_validator("level")
+    @classmethod
+    def _level(cls, v: str) -> str:
+        allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+        up = v.upper()
+        if up not in allowed:
+            raise ValueError(f"logging.level must be one of {sorted(allowed)}")
+        return up
+
+    @field_validator("content")
+    @classmethod
+    def _content(cls, v: str) -> str:
+        allowed = {"none", "prompts", "prompts_and_completions"}
+        if v not in allowed:
+            raise ValueError(f"logging.content must be one of {sorted(allowed)}")
+        return v
+
+    @field_validator("format")
+    @classmethod
+    def _format(cls, v: str) -> str:
+        if v not in {"text", "json"}:
+            raise ValueError("logging.format must be 'text' or 'json'")
+        return v
+
+    @field_validator("max_text_chars")
+    @classmethod
+    def _max_text_chars(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("logging.max_text_chars must be >= 0")
+        return v
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CRADLE_",
@@ -261,6 +313,7 @@ class Settings(BaseSettings):
     compress: CompressSettings = Field(default_factory=CompressSettings)
     reconstruct: ReconstructSettings = Field(default_factory=ReconstructSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     @model_validator(mode="after")
     def _flat_env_overrides(self) -> Settings:

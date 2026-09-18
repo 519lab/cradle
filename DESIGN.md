@@ -1229,7 +1229,10 @@ cradle_ready{component="l1|l2|embedder"}
 cradle_l2_points                                  # Gauge; warn log if > 20000
 ```
 
-No prompt text in logs.
+No prompt text in logs **by default**. Prompt/response text in the per-request
+log line is an explicit opt-in via `logging.content` (`none` → `prompts` →
+`prompts_and_completions`), off by default — the request-path analogue of
+`l2.audit_log_text`. See ADR-0004 in `DECISIONS.md`.
 
 ---
 

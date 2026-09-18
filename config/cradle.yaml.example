@@ -115,3 +115,17 @@ reconstruct:
 metrics:
   enabled: true
   require_auth: true
+
+logging:
+  # Two independent axes. level = how much detail; content = how sensitive.
+  level: INFO      # INFO: one request line per request. DEBUG: also per-candidate
+                   # L2 guard/rerank/audit-floor rejection lines. (WARNING and up
+                   # keep only warnings + errors.)
+  # content controls whether prompt/response TEXT (PII) may appear in the logs.
+  #   none                     keys, hashes, cache decision, scores, timings only
+  #   prompts                  + the request prompt text
+  #   prompts_and_completions  + the response text
+  # Default none on purpose (the request-path analogue of l2.audit_log_text).
+  content: none
+  format: text     # text = human-readable key=value; json = one JSON object per line
+  max_text_chars: 2000   # truncate any logged prompt/response text to this many chars
