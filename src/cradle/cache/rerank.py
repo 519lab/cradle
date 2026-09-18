@@ -56,7 +56,26 @@ class FastEmbedReranker:
         if cache_dir is not None:
             kwargs["cache_dir"] = cache_dir
         if cuda:
-            # FastEmbed selects CUDAExecutionProvider; requires onnxruntime-gpu.
+            # FastEmbed selects CUDAExecutionProvider; requires onnxruntime-gpu
+            # plus CUDA 13 / cuDNN 9 libs in the image. Fail with an actionable
+            # message rather than the raw fastembed ValueError, which just says
+            # "Provider CUDAExecutionProvider is not available" (issue #31): the
+            # CPU image has only onnxruntime, so l2.rerank_device: cuda needs the
+            # GPU image (docker/Dockerfile.gpu / compose.gpu.yml).
+            import onnxruntime as ort
+
+            providers = ort.get_available_providers()
+            if "CUDAExecutionProvider" not in providers:
+                raise RuntimeError(
+                    "l2.rerank_device is 'cuda' but onnxruntime has no "
+                    f"CUDAExecutionProvider (available: {providers}; "
+                    "AzureExecutionProvider ships in every CPU wheel and is inert — "
+                    "the missing one is CUDA). This is the CPU image, which installs "
+                    "onnxruntime, not onnxruntime-gpu. Build and run the GPU image "
+                    "(docker/Dockerfile.gpu with compose.gpu.yml, or "
+                    "uv sync --extra rerank-gpu on a CUDA host), or set "
+                    "l2.rerank_device: cpu."
+                )
             kwargs["cuda"] = True
             if device_ids is not None:
                 kwargs["device_ids"] = device_ids

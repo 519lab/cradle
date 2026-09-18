@@ -1,0 +1,27 @@
+# GPU override for Cradle: run the cross-encoder rerank on CUDA
+# (l2.rerank_device: cuda). Layer it on top of the base compose:
+#
+#   docker compose -f docker-compose.yml -f compose.gpu.yml up --build
+#
+# Requires on the host: an NVIDIA GPU, the NVIDIA driver, and the NVIDIA
+# Container Toolkit (so Docker can expose the GPU). Without a GPU, use the
+# plain `docker compose up --build` (CPU rerank, the default).
+#
+# This override (1) builds the GPU image (docker/Dockerfile.gpu, CUDA 13 +
+# cuDNN 9 base, onnxruntime-gpu), (2) reserves the GPU for the container, and
+# (3) sets rerank_device=cuda. The config file's l2.rerank_device is
+# overridden here so the GPU image and the cuda setting always travel together.
+services:
+  cradle:
+    build:
+      dockerfile: docker/Dockerfile.gpu
+    image: cradle:gpu
+    environment:
+      CRADLE_L2__RERANK_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,86 @@
+# GPU variant of the Cradle image: cross-encoder rerank on CUDA
+# (l2.rerank_device: cuda). The default CPU image is docker/Dockerfile — use
+# this one ONLY when you have an NVIDIA GPU, the NVIDIA driver, and the NVIDIA
+# Container Toolkit on the host, and you run with GPU access
+# (compose.gpu.yml, or `docker run --gpus all`).
+#
+# Why a separate file and base: onnxruntime-gpu needs the CUDA + cuDNN runtime
+# libraries present in the image (the wheel does not self-provision them), which
+# python:3.12-slim lacks. onnxruntime-gpu 1.30 (pinned via the rerank-gpu extra)
+# is built against CUDA 13.0 + cuDNN 9.x: per the onnxruntime CUDA-EP docs, PyPI
+# GPU packages ship with CUDA 13.0 by default from 1.27 on (1.29.x: 13.0, 9.x).
+# Hence the 13.0.1-cudnn-runtime base, not a 12.x tag. Bump this base in lockstep
+# with the onnxruntime-gpu pin in uv.lock (a 12.x base with a 1.27+ wheel makes
+# CUDAExecutionProvider list but fail to create -> silent CPU fallback). The
+# rerank-gpu extra REPLACES the CPU onnxruntime (they cannot coexist), hence
+# --no-install-package onnxruntime.
+
+FROM nvidia/cuda:13.0.1-cudnn-runtime-ubuntu24.04 AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /usr/local/bin/uv
+# Ubuntu 24.04 ships Python 3.12 (matches requires-python >=3.12). uv builds the
+# venv against this interpreter; no separate python download.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_PYTHON=python3.12
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src ./src
+# --extra rerank-gpu pulls onnxruntime-gpu; --no-install-package onnxruntime
+# drops the CPU build it would otherwise co-install (they conflict at runtime).
+RUN uv sync --frozen --no-dev --no-editable --extra rerank-gpu --no-install-package onnxruntime
+ARG BAKE_EMBEDDINGS=1
+# Bake the L2 cross-encoder reranker (~1.1GB) so a fresh container is
+# self-contained and does not download it at startup warm-up. The bake runs on
+# CPU (it only fetches weights); the runtime uses CUDA. BAKE_RERANK=0 to skip.
+ARG BAKE_RERANK=1
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+ENV FASTEMBED_CACHE_PATH=/opt/cradle/models/fastembed
+RUN mkdir -p /opt/cradle/models/fastembed \
+    && if [ "$BAKE_EMBEDDINGS" = "1" ]; then \
+         /app/.venv/bin/python -c \
+           "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/opt/cradle/models/fastembed')"; \
+       fi \
+    && if [ "$BAKE_RERANK" = "1" ]; then \
+         /app/.venv/bin/python -c \
+           "from fastembed.rerank.cross_encoder import TextCrossEncoder; TextCrossEncoder(model_name='BAAI/bge-reranker-base', cache_dir='/opt/cradle/models/fastembed')"; \
+       fi
+
+FROM nvidia/cuda:13.0.1-cudnn-runtime-ubuntu24.04
+# nvidia/cuda:*-ubuntu24.04 ships an "ubuntu" user at UID 1000; remove it so the
+# cradle user can own UID 1000 — the same UID the CPU image (docker/Dockerfile)
+# uses, so a /data volume created by either image has matching ownership.
+# entrypoint.sh chowns /data to cradle:cradle at boot. Ubuntu 24.04 has python3.12.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3.12 python3.12-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && (userdel -r ubuntu 2>/dev/null || true) \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin cradle \
+    && mkdir -p /data /opt/cradle/models/fastembed \
+    && chown -R cradle:cradle /data /opt/cradle
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+COPY config /app/config
+COPY --from=builder --chown=cradle:cradle /opt/cradle/models /opt/cradle/models
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod 755 /app/entrypoint.sh
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    CRADLE_SERVER__HOST=0.0.0.0 \
+    CRADLE_DATA_DIR=/data \
+    CRADLE_CONFIG=/app/config/cradle.yaml \
+    FASTEMBED_CACHE_PATH=/opt/cradle/models/fastembed \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+USER root
+EXPOSE 8000
+# Use the venv interpreter explicitly: the base has python3.12/python3 but no
+# bare `python`, and relying on PATH resolution hides a broken venv.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD /app/.venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["/app/.venv/bin/python", "-m", "cradle"]

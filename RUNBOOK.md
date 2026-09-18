@@ -14,7 +14,9 @@ and the streaming usage round-trip (§2/§7 wrap path). §3 (worker guard, 20k c
 (induced-failure rows), and §7's recovery levers remain code-derived — a healthy rebuild
 does not exercise them, and the destructive resets must not be run against a live instance
 to "verify" them. Drive those against a throwaway instance before relying on them, and
-update this line.*
+update this line. **§1.4 (GPU rerank) is unverified** — the CUDA build was not run on a GPU
+host in-session; the crash guardrail and the CPU path are tested, the GPU image itself is
+not.*
 
 > **Keeping this current is not optional.** Any change touching a config key, an env
 > var, a metric name, a health/readiness condition, a capacity limit, or a per-request
@@ -92,11 +94,52 @@ These raise during the lifespan startup and the process exits — a crash-loop, 
 | Embedder dim mismatch | `RuntimeError: embed dim N != 384` | Wrong `l2.model`/`l2.dim` |
 | `features.local_1b` on without extra | `RuntimeError: features.local_1b requires extra cradle[local-1b]` | Install extra or turn the flag off |
 | Unknown key in `cradle.yaml` (e.g. a config field removed in an upgrade) | `ValidationError: Extra inputs are not permitted` | Remove the stale key — every config model is `extra="forbid"`, so an unrecognized key is fatal, not ignored |
+| `l2.rerank_device: cuda` on the **CPU** image | `RuntimeError: l2.rerank_device is 'cuda' but onnxruntime has no CUDAExecutionProvider…` | Build/run the **GPU image** (§1.4) or set `l2.rerank_device: cpu`. `cuda` is inert without the GPU image. |
 
 **Reranker warm-up failure does NOT crash startup.** It is caught, logged
 (`reranker warm-up failed; L2 rerank is degraded`), leaves `reranker_ready=False`, and
 makes `/readyz` return **503** (see §2.2, §5). This is deliberate: a container with the
 #5 entity-swap protection silently off must not take traffic with a green check.
+
+### 1.4 GPU rerank (optional — `l2.rerank_device: cuda`)
+
+By default the cross-encoder reranker runs on **CPU** (`l2.rerank_device: cpu`,
+~15–40 ms per L2 hit) — the plain `docker compose up --build` image. GPU rerank
+(~2–5 ms/hit) is a **separate image**: `l2.rerank_device: cuda` on the CPU image
+crash-loops (§1.3), because that image ships CPU `onnxruntime`, not the CUDA build.
+
+**Host prerequisites** (Cradle can't provide these): an NVIDIA GPU, the NVIDIA driver
+(new enough for **CUDA 13** — the image is built on it), and the **NVIDIA Container
+Toolkit** so Docker can expose the GPU. Verify with
+`docker run --rm --gpus all nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi`.
+
+**Build & run the GPU image:**
+
+```bash
+docker compose -f docker-compose.yml -f compose.gpu.yml up --build
+```
+
+`compose.gpu.yml` builds `docker/Dockerfile.gpu` (a `nvidia/cuda:13.0.1-cudnn-runtime`
+base with `onnxruntime-gpu` swapped in for the CPU `onnxruntime` — they cannot coexist),
+reserves the GPU for the container, and sets `CRADLE_L2__RERANK_DEVICE=cuda`. So the GPU
+image and the `cuda` setting always travel together — you do not separately edit
+`rerank_device` in `config/cradle.yaml` for the compose path.
+
+**Bare-metal GPU:** `uv sync --extra rerank-gpu --no-install-package onnxruntime` on a
+host with CUDA 13.x + cuDNN 9.x, then `l2.rerank_device: cuda`.
+
+**Confirm it's actually on the GPU:** startup does not crash (the CPU image would, per
+§1.3), and `nvidia-smi` on the host shows the container's python process holding GPU
+memory. `cradle_ready{component="reranker"}` = 1 as usual.
+
+**Silent CPU fallback (host driver too old):** if the container *starts fine* on the GPU
+image but rerank latency looks like CPU (`cradle_latency_seconds` for the rerank path
+~15–40 ms instead of ~2–5 ms, and `cradle_l2_rerank_fail_open_total` unaffected), onnxruntime
+likely logged `Failed to create CUDAExecutionProvider` and fell back to CPU — the reranker
+still works, just slowly. Cause is a host **NVIDIA driver older than the image's CUDA major
+version** (the image is CUDA 13). Check the startup logs for that line and update the host
+driver. The startup crash-guard only catches a *missing* provider, not a *non-creatable*
+one, because the latter still produces a working (CPU) reranker.
 
 ---
 

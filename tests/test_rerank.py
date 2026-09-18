@@ -63,3 +63,15 @@ def test_calibration_points(score: float, expected: bool) -> None:
     """Representative scores from the widened fixture at the default ~4.0 line."""
     ok, _ = passes(FakeReranker(score), "q", "c", threshold=4.0)
     assert ok is expected
+
+
+def test_cuda_without_provider_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """cuda=True on a build with no CUDAExecutionProvider fails with a clear
+    message pointing at the GPU image, not the raw fastembed ValueError (#31)."""
+    import onnxruntime as ort
+
+    from cradle.cache.rerank import FastEmbedReranker
+
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    with pytest.raises(RuntimeError, match="rerank_device"):
+        FastEmbedReranker("BAAI/bge-reranker-base", cuda=True)
