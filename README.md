@@ -28,12 +28,15 @@ Dev listen: `http://127.0.0.1:8000`. Default upstream in YAML is `http://127.0.0
 ```bash
 cp .env.example .env                               # optional CRADLE_UPSTREAM_BASE_URL
 cp config/cradle.yaml.example config/cradle.yaml   # your local config; the real file is gitignored
+cp docker-compose-cpu.yml docker-compose.yml       # pick the CPU (default) or GPU template; docker-compose.yml is gitignored
 docker compose up --build
 ```
 
+There are two compose templates — `docker-compose-cpu.yml` (default, CPU rerank) and `docker-compose-gpu.yml` (CUDA rerank, see below). Copy the one you want to `docker-compose.yml` (the gitignored local working copy), then `docker compose up` finds it with no `-f` flag.
+
 Gateway is at `http://127.0.0.1:8000`. Compose default upstream is `http://host.docker.internal:8080/v1` (a server on the host, not `127.0.0.1` inside the container). Override with `CRADLE_UPSTREAM_BASE_URL`. L1/L2 state is the `cradle-data` volume (`/data`). FastEmbed weights are baked at `/opt/cradle/models/fastembed` so the volume does not hide them.
 
-The image does **not** declare `VOLUME /data`. CI uses `compose.ci.yml` with tmpfs on `/data` and L2 off.
+The image does **not** declare `VOLUME /data`. CI uses `docker-compose-ci.yml` with tmpfs on `/data` and L2 off.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -64,7 +67,7 @@ Cradle picks the **backend** from the request `model` via `routes` in `config/cr
 - MIT license. GitHub: `519lab/cradle`. No PyPI in v1.
 - Reconstruction is a prefix/suffix envelope (partial PRD FR-3.1). Structural distillation is off (`features.structure: false`).
 - This is a gateway, not an inference runtime: it does not load a chat model. Upstream is whatever OpenAI-compatible API you configure.
-- **GPU rerank** (`l2.rerank_device: cuda`, ~2–5 ms/hit vs ~15–40 ms on CPU) is a separate image — `docker compose -f docker-compose.yml -f compose.gpu.yml up --build` on a host with an NVIDIA GPU + Container Toolkit. The default image is CPU; `cuda` on it crash-loops with an actionable error. See `RUNBOOK.md` §1.4.
+- **GPU rerank** (`l2.rerank_device: cuda`, ~2–5 ms/hit vs ~15–40 ms on CPU) is a separate image — `cp docker-compose-gpu.yml docker-compose.yml && docker compose up --build` on a host with an NVIDIA GPU + Container Toolkit. The default is the CPU template; `cuda` on the CPU image crash-loops with an actionable error. See `RUNBOOK.md` §1.4.
 - **Volatility guard** (`cache.volatility_guard`, default on): prompts that ask about time-sensitive things — "latest version", "current price", "today", weather, news — are cached for `cache.volatile_ttl_s` (default 300 s, `0` = never) instead of 24 h, so a correct-but-stale answer is not replayed all day. The reason is returned as `X-Cradle-Volatile`; an explicit `X-Cradle-Cache-TTL` header always wins.
 
 ## Per-request cache controls

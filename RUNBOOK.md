@@ -14,9 +14,9 @@ and the streaming usage round-trip (§2/§7 wrap path). §3 (worker guard, 20k c
 (induced-failure rows), and §7's recovery levers remain code-derived — a healthy rebuild
 does not exercise them, and the destructive resets must not be run against a live instance
 to "verify" them. Drive those against a throwaway instance before relying on them, and
-update this line. **§1.4 (GPU rerank) is unverified** — the CUDA build was not run on a GPU
-host in-session; the crash guardrail and the CPU path are tested, the GPU image itself is
-not.*
+update this line. **§1.4 (GPU rerank)** was verified on 2026-09-18 on an RTX 4080 host
+(driver CUDA 13.4): the GPU image starts with CUDA assigned, no `libcuda.so.1` /
+`Failed to create CUDAExecutionProvider` in the logs.*
 
 > **Keeping this current is not optional.** Any change touching a config key, an env
 > var, a metric name, a health/readiness condition, a capacity limit, or a per-request
@@ -54,9 +54,15 @@ against the upstream directly are upstream problems, not Cradle.
 ```bash
 cp .env.example .env                                # set CRADLE_UPSTREAM_BASE_URL
 cp config/cradle.yaml.example config/cradle.yaml    # the real file is GITIGNORED — this is a real first-deploy trap
+cp docker-compose-cpu.yml docker-compose.yml        # pick a compose template (CPU here; GPU is §1.4). docker-compose.yml is gitignored.
 docker compose up --build
 ```
 
+- **Compose templates:** the repo tracks `docker-compose-cpu.yml` (default) and
+  `docker-compose-gpu.yml` (§1.4); `docker-compose-ci.yml` is CI-only. `docker-compose.yml`
+  itself is **gitignored** — copy the template you want to it, then plain `docker compose up`
+  finds it with no `-f` flag. A fresh clone has no `docker-compose.yml`, so `docker compose up`
+  errors until you copy one.
 - `config/cradle.yaml` is **gitignored**; a fresh clone has no `config/cradle.yaml`,
   only `.example`. Missing it means Cradle falls back to `CRADLE_CONFIG=config/cradle.yaml`
   and the pydantic defaults. Copy the example first.
@@ -116,21 +122,38 @@ Toolkit** so Docker can expose the GPU. Verify with
 **Build & run the GPU image:**
 
 ```bash
-docker compose -f docker-compose.yml -f compose.gpu.yml up --build
+cp docker-compose-gpu.yml docker-compose.yml
+docker compose up --build
 ```
 
-`compose.gpu.yml` builds `docker/Dockerfile.gpu` (a `nvidia/cuda:13.0.1-cudnn-runtime`
+`docker-compose-gpu.yml` is a **complete standalone** template (not an override — don't
+layer it on the CPU one). It builds `docker/Dockerfile.gpu` (a `nvidia/cuda:13.0.1-cudnn-runtime`
 base with `onnxruntime-gpu` swapped in for the CPU `onnxruntime` — they cannot coexist),
-reserves the GPU for the container, and sets `CRADLE_L2__RERANK_DEVICE=cuda`. So the GPU
-image and the `cuda` setting always travel together — you do not separately edit
-`rerank_device` in `config/cradle.yaml` for the compose path.
+grants the container the host GPU via `gpus: all` (with a `deploy.reservations` fallback),
+and sets `CRADLE_L2__RERANK_DEVICE=cuda`. So the GPU image and the `cuda` setting always
+travel together — you do not separately edit `rerank_device` in `config/cradle.yaml`.
+
+> The GPU grant matters: a compose file that reserves the GPU only via the older
+> `deploy.resources` block (no `gpus:` key) can start the container **with no GPU**, and
+> rerank then fails open to CPU with `libcuda.so.1: cannot open shared object file` in the
+> logs. `gpus: all` is the reliable form. First confirm the host works with
+> `docker run --rm --gpus all nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi`.
 
 **Bare-metal GPU:** `uv sync --extra rerank-gpu --no-install-package onnxruntime` on a
 host with CUDA 13.x + cuDNN 9.x, then `l2.rerank_device: cuda`.
 
 **Confirm it's actually on the GPU:** startup does not crash (the CPU image would, per
-§1.3), and `nvidia-smi` on the host shows the container's python process holding GPU
-memory. `cradle_ready{component="reranker"}` = 1 as usual.
+§1.3), the logs have **no** `libcuda.so.1: cannot open` or `Failed to create
+CUDAExecutionProvider` line, and `nvidia-smi` on the host shows the container's python
+process holding GPU memory. `cradle_ready{component="reranker"}` = 1 as usual. A
+`VerifyEachNodeIsAssignedToAnEp … shape related ops to CPU` warning at startup is
+**benign and expected** — onnxruntime always runs a few shape/control ops on CPU even on a
+fully-working CUDA session; it is not a fallback.
+
+**Switching CPU ↔ GPU keeps the cache.** Both templates use the same `cradle-data` volume
+(Compose namespaces it by project = directory name), so copying the other template to
+`docker-compose.yml` and recreating **reuses** the L1/L2 cache — no wipe, no re-warm. The
+cache is backend-agnostic (entries are scoped by `pipeline_version` + backend namespace).
 
 **Silent CPU fallback (host driver too old):** if the container *starts fine* on the GPU
 image but rerank latency looks like CPU (`cradle_latency_seconds` for the rerank path
