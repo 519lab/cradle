@@ -30,6 +30,12 @@ services:
       CRADLE_UPSTREAM_API_KEY: ${CRADLE_UPSTREAM_API_KEY:-}
       CRADLE_UPSTREAM_BASE_URL: ${CRADLE_UPSTREAM_BASE_URL:-http://host.docker.internal:8080/v1}
     volumes:
+      # Runtime config is bind-mounted, not baked into the image (#36): edit the
+      # host config/cradle.yaml and `docker compose restart cradle` — no rebuild.
+      # Mount the whole config/ dir (always present in a clone) rather than the
+      # file (absent in a fresh clone, which would make compose auto-create it as
+      # an empty directory). No file → Cradle runs on code defaults.
+      - ./config:/app/config:ro
       - cradle-data:/data
     restart: unless-stopped
 

@@ -39,6 +39,12 @@ services:
       # here rather than in config/cradle.yaml.
       CRADLE_L2__RERANK_DEVICE: cuda
     volumes:
+      # Runtime config is bind-mounted, not baked into the image (#36): edit the
+      # host config/cradle.yaml and `docker compose restart cradle` — no rebuild.
+      # Mount the whole config/ dir (always present in a clone) rather than the
+      # file (absent in a fresh clone, which would make compose auto-create it as
+      # an empty directory). No file → Cradle runs on code defaults.
+      - ./config:/app/config:ro
       - cradle-data:/data
     restart: unless-stopped
     # Expose the host GPU to the container (needs the NVIDIA Container Toolkit).

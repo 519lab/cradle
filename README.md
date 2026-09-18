@@ -34,6 +34,8 @@ docker compose up --build
 
 There are two compose templates — `docker-compose-cpu.yml` (default, CPU rerank) and `docker-compose-gpu.yml` (CUDA rerank, see below). Copy the one you want to `docker-compose.yml` (the gitignored local working copy), then `docker compose up` finds it with no `-f` flag.
 
+The templates **bind-mount `config/cradle.yaml` read-only into the container** (`./config:/app/config:ro`) rather than baking it in, so a config edit takes effect on `docker compose restart cradle` — no rebuild. With no host `config/cradle.yaml`, Cradle runs on the built-in defaults (the image bakes only `cradle.yaml.example`). See `RUNBOOK.md` §1.1 / §7.1.
+
 Gateway is at `http://127.0.0.1:8000`. Compose default upstream is `http://host.docker.internal:8080/v1` (a server on the host, not `127.0.0.1` inside the container). Override with `CRADLE_UPSTREAM_BASE_URL`. L1/L2 state is the `cradle-data` volume (`/data`). FastEmbed weights are baked at `/opt/cradle/models/fastembed` so the volume does not hide them.
 
 The image does **not** declare `VOLUME /data`. CI uses `docker-compose-ci.yml` with tmpfs on `/data` and L2 off.

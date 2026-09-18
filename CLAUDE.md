@@ -40,7 +40,7 @@ Noisy CI latency gate:
 CRADLE_SKIP_LATENCY=1 uv run pytest
 ```
 
-Default config: `config/cradle.yaml`. Override the fallback upstream with `CRADLE_UPSTREAM_BASE_URL`. Named backends live under `upstreams:` with `routes:` (`fnmatch` on `model`). Proxy listen is `127.0.0.1:8000`. Default is intercept mode: no Cradle API key; client `Authorization` is forwarded and used as the cache tenant. Optional `auth.keys` is an allowlist. OpenAI-compatible clients only; Claude Code’s Anthropic `/v1/messages` is not implemented.
+Default config: `config/cradle.yaml` (gitignored; copy `config/cradle.yaml.example`). Under Docker it is **bind-mounted read-only** (`./config:/app/config:ro`), not baked into the image — a config edit is a `docker compose restart cradle`, not a rebuild; the image bakes only `cradle.yaml.example`, and with no host file Cradle runs on code defaults (#36). Override the fallback upstream with `CRADLE_UPSTREAM_BASE_URL`. Named backends live under `upstreams:` with `routes:` (`fnmatch` on `model`). Proxy listen is `127.0.0.1:8000`. Default is intercept mode: no Cradle API key; client `Authorization` is forwarded and used as the cache tenant. Optional `auth.keys` is an allowlist. OpenAI-compatible clients only; Claude Code’s Anthropic `/v1/messages` is not implemented.
 
 Per-request cache directives come from `X-Cradle-Cache-Control` (`no-store`, `no-cache`/`refresh`, `probe`) and `X-Cradle-Cache-TTL`. `probe` is a dry run: it returns a `cradle.probe` JSON explanation of the L1/L2/guard/rerank decision and never writes or calls upstream (`src/cradle/gateway/probe.py`).
 
