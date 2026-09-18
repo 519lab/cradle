@@ -61,7 +61,7 @@ class FastEmbedReranker:
             # message rather than the raw fastembed ValueError, which just says
             # "Provider CUDAExecutionProvider is not available" (issue #31): the
             # CPU image has only onnxruntime, so l2.rerank_device: cuda needs the
-            # GPU image (docker/Dockerfile.gpu / compose.gpu.yml).
+            # GPU image (docker/Dockerfile.gpu / docker-compose-gpu.yml).
             import onnxruntime as ort
 
             providers = ort.get_available_providers()
@@ -72,7 +72,7 @@ class FastEmbedReranker:
                     "AzureExecutionProvider ships in every CPU wheel and is inert — "
                     "the missing one is CUDA). This is the CPU image, which installs "
                     "onnxruntime, not onnxruntime-gpu. Build and run the GPU image "
-                    "(docker/Dockerfile.gpu with compose.gpu.yml, or "
+                    "(docker/Dockerfile.gpu with docker-compose-gpu.yml, or "
                     "uv sync --extra rerank-gpu on a CUDA host), or set "
                     "l2.rerank_device: cpu."
                 )

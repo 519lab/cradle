@@ -1,0 +1,53 @@
+# Cradle — GPU variant: cross-encoder rerank on CUDA (l2.rerank_device: cuda,
+# ~2-5 ms/hit vs ~15-40 ms on CPU). This is a COMPLETE, standalone compose file,
+# not an override — pick it OR docker-compose-cpu.yml, don't layer them.
+#
+# Usage: copy the one you want to docker-compose.yml (gitignored, the local
+# working copy), then run plain compose:
+#
+#   cp docker-compose-gpu.yml docker-compose.yml
+#   docker compose up --build
+#
+# Requires on the host: an NVIDIA GPU, an NVIDIA driver new enough for CUDA 13
+# (the image is built on it), and the NVIDIA Container Toolkit so Docker can
+# expose the GPU. Without those, use docker-compose-cpu.yml instead — cuda on the
+# CPU image crash-loops with an actionable error. See RUNBOOK.md §1.4.
+services:
+  cradle:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gpu
+      args:
+        BAKE_EMBEDDINGS: "1"
+        HF_TOKEN: ${HF_TOKEN:-}
+    image: cradle:gpu
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CRADLE_SERVER__HOST: "0.0.0.0"
+      CRADLE_DATA_DIR: /data
+      CRADLE_CONFIG: /app/config/cradle.yaml
+      FASTEMBED_CACHE_PATH: /opt/cradle/models/fastembed
+      CRADLE_UPSTREAM_API_KEY: ${CRADLE_UPSTREAM_API_KEY:-}
+      CRADLE_UPSTREAM_BASE_URL: ${CRADLE_UPSTREAM_BASE_URL:-http://host.docker.internal:8080/v1}
+      # The GPU image and the cuda setting always travel together, so it is set
+      # here rather than in config/cradle.yaml.
+      CRADLE_L2__RERANK_DEVICE: cuda
+    volumes:
+      - cradle-data:/data
+    restart: unless-stopped
+    # Expose the host GPU to the container (needs the NVIDIA Container Toolkit).
+    # `gpus: all` maps to `--gpus all` and is honored by plain `docker compose up`.
+    # The older `deploy.resources.reservations.devices` (Swarm-era) form is NOT
+    # reliably applied by `docker compose up` and silently starts the container
+    # with no GPU — rerank then fails open to CPU with `libcuda.so.1: cannot open`
+    # in the logs. So this uses `gpus:` only, not that form.
+    gpus: all
+
+volumes:
+  cradle-data:

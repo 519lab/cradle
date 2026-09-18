@@ -2,7 +2,7 @@
 # (l2.rerank_device: cuda). The default CPU image is docker/Dockerfile — use
 # this one ONLY when you have an NVIDIA GPU, the NVIDIA driver, and the NVIDIA
 # Container Toolkit on the host, and you run with GPU access
-# (compose.gpu.yml, or `docker run --gpus all`).
+# (docker-compose-gpu.yml, or `docker run --gpus all`).
 #
 # Why a separate file and base: onnxruntime-gpu needs the CUDA + cuDNN runtime
 # libraries present in the image (the wheel does not self-provision them), which

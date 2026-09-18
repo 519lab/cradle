@@ -19,9 +19,12 @@ uv run ruff check .
 uv run pytest
 uv run pytest --cov=cradle --cov-report=term-missing --cov-fail-under=90
 uv run python -m cradle
-docker compose -f compose.ci.yml build
+docker compose -f docker-compose-ci.yml build
+cp docker-compose-cpu.yml docker-compose.yml   # or docker-compose-gpu.yml; docker-compose.yml is gitignored
 docker compose up --build
 ```
+
+Compose templates: `docker-compose-cpu.yml` (default), `docker-compose-gpu.yml` (CUDA rerank), `docker-compose-ci.yml` (CI). Copy the one you want to `docker-compose.yml` (gitignored working copy) so plain `docker compose up` finds it.
 
 Optional real-BGE pair eval (downloads the ONNX model):
 

@@ -1,3 +1,11 @@
+# Cradle — CPU variant (default): cross-encoder rerank on CPU (~15-40 ms/hit).
+# For GPU rerank (~2-5 ms) use docker-compose-gpu.yml instead. Pick one.
+#
+# Usage: copy the one you want to docker-compose.yml (gitignored, the local
+# working copy), then run plain compose:
+#
+#   cp docker-compose-cpu.yml docker-compose.yml
+#   docker compose up --build
 services:
   cradle:
     build:

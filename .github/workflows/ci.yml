@@ -26,14 +26,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: docker compose -f compose.ci.yml build
+        run: docker compose -f docker-compose-ci.yml build
       - name: Smoke
         run: |
-          docker compose -f compose.ci.yml up -d
-          trap 'docker compose -f compose.ci.yml logs; docker compose -f compose.ci.yml down' EXIT
+          docker compose -f docker-compose-ci.yml up -d
+          trap 'docker compose -f docker-compose-ci.yml logs; docker compose -f docker-compose-ci.yml down' EXIT
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8000/healthz && curl -fsS http://127.0.0.1:8000/readyz; then
-              trap 'docker compose -f compose.ci.yml down' EXIT
+              trap 'docker compose -f docker-compose-ci.yml down' EXIT
               exit 0
             fi
             sleep 1
