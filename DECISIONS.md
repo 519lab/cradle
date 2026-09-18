@@ -176,3 +176,62 @@ RUNBOOK.md §4 documents them. `content` above `none` writes PII to the logs; th
 comment and this ADR mark it. A client that disconnects mid-stream now still emits a request
 line (`disconnected=true`), closing a prior observability hole where the streaming success
 line ran only after the body completed.
+
+## ADR-0005: The L2 match embedding excludes the system prompt
+
+**Date:** 2026-09-18
+**Status:** Accepted
+**Phase:** Correctness
+**Deciders:** Greg
+
+### Context
+
+A live instance served an L2 hit whose answer belonged to a *different* user task (issue #40):
+under one large fixed system prompt (open-webui traffic), a "riff on these creative prompts"
+request was served a title-generation-shaped answer as a `200`, at `sim=0.987 rerank=pass:7.59`.
+`embed_text` was built from **all** messages, system prompt included. When the system prompt is
+a large block identical across requests, it dominates the embedding: the short discriminating
+user turn is a fraction of the vector, so unrelated user questions land at very high cosine, and
+both the cosine gate and the cross-encoder rerank are diluted the same way and pass.
+
+Measured on the real bge models (thresholds cosine 0.90 / rerank 4.0), two genuinely different
+user tasks under one shared system prompt:
+
+| embed_text | cosine | rerank |
+|---|---|---|
+| system+user (before) | 0.93 | 6.27 |
+| user-only (after) | 0.61 | −4.61 |
+
+### Decision
+
+`embed_text` is built from **user/assistant turns only**; system and developer turns are
+excluded from the match embedding. The system prompt stays in the cache *identity* —
+`system_prompt_version` scoping plus the L1 key — so a different system prompt still separates
+entries (correctness) and the token-savings/caching behavior is unchanged. It simply no longer
+pollutes similarity. A request with no user/assistant content (system-only) has an empty
+`embed_text` and is L2-ineligible (an empty vector matches anything). `pipeline_version` is
+bumped **v2→v3**: existing L2 vectors and records were computed from system+user text, and
+mixing a user-only query against them at the vector/guard/rerank stages is unpredictable, so the
+bump makes pre-fix entries miss and age out on TTL.
+
+### Rationale
+
+The two jobs of the system prompt were conflated. It legitimately belongs to *whether a cached
+answer may be replayed* (a different system prompt can change the answer) and to token savings —
+both handled by identity scoping. It does **not** belong to *which stored answer this question
+matches* — that is the discriminating user content. Separating them fixes the false hit at the
+root (a whole class of open-webui/RAG/agent shapes with a big shared frame) rather than papering
+over it with a higher threshold, which would also suppress genuine paraphrases. `embed_text` now
+means "matchable content," not "the prompt"; the guard, rerank, `audits.jsonl` rows, and the
+`logging.content` `prompt=` field all read it under that meaning.
+
+### Consequences
+
+Operator-visible: the `pipeline_version` bump ages out the entire existing L2 (and L1) cache on
+deploy — hit rate drops until the caches refill and old entries pass TTL (see RUNBOOK §7.2, the
+same lever as the v1→v2 wrap-stream fix). The `prompt=` field in the request log lines and the
+`query_text`/`candidate_text` rows in `audits.jsonl` now carry user/assistant turns only, not the
+system prompt — shorter lines, and less prompt PII when `logging.content`/`audit_log_text` are on.
+A separate, pre-existing eval finding surfaced while proving this (three `l2_pairs.jsonl` hit pairs
+fall below the 0.90 floor with real bge) is tracked independently; it is the inverse failure —
+false negatives at the threshold, not #40's false positives.

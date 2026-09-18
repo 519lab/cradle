@@ -5,7 +5,7 @@ server:
 
 data_dir: ./data
 
-pipeline_version: v2
+pipeline_version: v3
 
 auth:
   allow_insecure_loopback: false
