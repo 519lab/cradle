@@ -299,10 +299,13 @@ class Settings(BaseSettings):
 
     server: ServerSettings = Field(default_factory=ServerSettings)
     data_dir: Path = Path("./data")
-    # Bumped v1→v2 with the wrap-stream usage fix: pre-fix wrap-stream entries stored
-    # empty usage and must not be replayed. pipeline_version folds into the L1 key and
-    # the L2 filter, so the bump makes those entries miss and age out on TTL.
-    pipeline_version: str = "v2"
+    # Bumped v2→v3 with the #40 embed_text fix: L2 vectors and records were computed
+    # from system+user text, but the query now embeds user/assistant turns only.
+    # Mixing a user-only query against system+user records at the vector/guard/rerank
+    # stages is unpredictable, so the bump makes pre-fix entries miss and age out on
+    # TTL. (v1→v2 was the wrap-stream usage fix.) pipeline_version folds into the L1
+    # key and the L2 filter.
+    pipeline_version: str = "v3"
     auth: AuthSettings = Field(default_factory=AuthSettings)
     upstream: UpstreamSettings = Field(default_factory=UpstreamSettings)
     upstreams: dict[str, UpstreamSettings] = Field(default_factory=dict)

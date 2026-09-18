@@ -195,7 +195,16 @@ def canonicalize(
     tool_choice = _empty_to_none(_sort_json(req.tool_choice))
     logit_bias = _empty_to_none(_sort_json(req.logit_bias))
     has_tools = tools is not None
-    embed_text = "".join(f"{m.role}: {m.content}\n" for m in messages)
+    # embed_text drives L2 response matching. Exclude system/developer turns: they
+    # are (a) already folded into the cache identity via system_prompt_version and
+    # the L1 key, and (b) frequently a large fixed block (open-webui/RAG/agent
+    # frames) that dominates the embedding and collides unrelated user questions at
+    # high cosine — the #40 wrong-hit. Match on the discriminating user/assistant
+    # content only. (The system prompt still gates correctness and saves tokens; it
+    # just no longer pollutes similarity.)
+    embed_text = "".join(
+        f"{m.role}: {m.content}\n" for m in messages if m.role not in {"system", "developer"}
+    )
     c = CanonicalRequest(
         tenant_id=principal.tenant_id,
         user_id=principal.user_id,
@@ -256,5 +265,10 @@ def l2_eligible(canonical: CanonicalRequest, req: ChatRequest, settings: Setting
     if len(canonical.messages) > settings.l2.max_messages:
         return False
     if canonical.temperature > settings.cache.max_temperature:
+        return False
+    # embed_text now excludes system/developer turns (#40); a request that carries
+    # only a system prompt (no user/assistant content) yields an empty embed_text,
+    # which must never be embedded — an empty vector matches anything.
+    if not canonical.embed_text.strip():
         return False
     return True

@@ -18,3 +18,4 @@
 {"id": "miss-8", "expect": "miss", "a": "How to install Docker on Debian?", "b": "How to uninstall Docker on Debian?"}
 {"id": "miss-9", "expect": "miss", "same_user": false, "a": "Shared prefix question about taxes", "b": "Shared prefix question about taxes"}
 {"id": "miss-10", "expect": "miss", "seed_a": 1, "seed_b": 2, "a": "Write a poem about rain.", "b": "Write a poem about rain."}
+{"id": "miss-40-sysdilute", "expect": "miss", "a": "### Task: Generate a clear, concise title for the provided content. Respond with a single title only.", "b": "Explain airplanes like I'm a confused goldfish, or write a military strategist's tactical briefing on grocery shopping."}

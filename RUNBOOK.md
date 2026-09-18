@@ -219,7 +219,7 @@ curl -s -D - -o /dev/null http://<host>:8000/v1/chat/completions \
   -H "Authorization: Bearer any-token" -H "Content-Type: application/json" \
   -d '{"model":"qwen","temperature":0,"messages":[{"role":"user","content":"ping"}]}'
 # Look for:  x-cradle-cache: MISS|HIT-L1|HIT-L2|BYPASS
-#            x-cradle-pipeline: v2   x-cradle-upstream: <backend>   x-request-id: <uuid>
+#            x-cradle-pipeline: v3   x-cradle-upstream: <backend>   x-request-id: <uuid>
 ```
 
 In **intercept mode** (`auth.keys: []`, the default) any Bearer works and is forwarded
@@ -358,7 +358,9 @@ The default `content: none` line carries: `request_id`, `cache` (`l1`/`l2`/`miss
 `volatile`, `audit`, the `t_*` stage timings, and inbound/upstream token counts — enough to
 answer "what did Cradle decide?" without any prompt text. An **upstream error** (429/5xx) still
 logs a line, carrying `status` (what Cradle returned) and `upstream_status` (what the backend
-returned). A client that disconnects mid-stream logs a line with `disconnected=true`. Two
+returned). At `prompts`/`prompts_and_completions`, the `prompt=` field carries the **user/assistant
+turns only** — the system prompt is excluded from `embed_text` (#40, ADR-0005), so it is not in
+that field. A client that disconnects mid-stream logs a line with `disconnected=true`. Two
 failure paths log their traceback at WARNING: an embed failure (`embed failed … L2 read
 skipped`) and a rerank fail-open.
 
@@ -380,10 +382,10 @@ These are drawn from real production incidents (referenced issues are in `CHANGE
 |---|---|---|---|
 | Container "healthy-ish" but `/readyz` = 503 | `cradle_ready{component}`; startup logs | A component didn't warm up. Most common: reranker load failed (embedder/L2 crash startup instead) | Fix the model/weights; if `l2_rerank` isn't needed, set `features.l2_rerank: false`. Don't route traffic to a 503 instance. |
 | Startup crash-loop | container logs for `RuntimeError`/`NotImplementedError`/`PermissionError` | One of the §1.3 conditions (workers≠1, `l2.mode=server`, bad `auth.keys`, unwritable `data_dir`, dim mismatch) | Fix per §1.3. This is a startup failure, not a readiness issue. |
-| Wrong / stale answer served as `HIT-L2` | Re-run with `X-Cradle-Cache-Control: probe` (§6.1); read `X-Cradle-Similarity`/`X-Cradle-Guard`/`X-Cradle-Rerank` | A near-miss cleared cosine + guard + rerank (e.g. antonym/negation edge — the documented residual gap) | Enable `l2.audit_rate` to measure it; raise `l2.cosine_threshold`/`l2.rerank_threshold`; the audit-floor will self-heal the specific entry. Purge via `pipeline_version` bump (§7.2) if widespread. |
+| Wrong / stale answer served as `HIT-L2` | Re-run with `X-Cradle-Cache-Control: probe` (§6.1); read `X-Cradle-Similarity`/`X-Cradle-Guard`/`X-Cradle-Rerank` | A near-miss cleared cosine + guard + rerank (e.g. antonym/negation edge — the documented residual gap). **A large shared system prompt** dominating the embedding was the #40 cause — fixed in `v3` by embedding user/assistant turns only, so entries written before `v3` could still exhibit it until they age out | Confirm the running pipeline is `v3` (`X-Cradle-Pipeline`); pre-`v3` entries miss and expire on TTL. Otherwise: enable `l2.audit_rate` to measure it; raise `l2.cosine_threshold`/`l2.rerank_threshold`; the audit-floor self-heals the specific entry. Purge via `pipeline_version` bump (§7.2) if widespread. |
 | Empty answers appearing / cached | `cradle_cache_write_skips_total{reason}`; upstream direct | Upstream returned `200` with empty content (`finish_reason: stop`, no text) — seen live from llama.cpp (#24). Gate now refuses to cache it | Investigate the upstream. The write-quality gate + audit already prevent caching/self-healing empties; a spike means the upstream is misbehaving. |
 | Paraphrase keeps replaying an old answer after a `refresh` | `X-Cradle-Cache`; whether L2 point updated | Pre-fix behavior (#18) left the stale L2 point when only L1 was refreshed | On current code the prompt is always embedded on refresh; if seen, confirm the running image is current (`X-Cradle-Pipeline`). |
-| Streaming cache hit replays empty `usage` | client `stream_options.include_usage`; `X-Cradle-Pipeline` | Pre-v2 wrap-stream entries stored empty usage (the wrap-stream usage fix). `pipeline_version` bumped v1→v2 so they miss and age out | Ensure the running pipeline is `v2` (it is, live); old entries expire on TTL. |
+| Streaming cache hit replays empty `usage` | client `stream_options.include_usage`; `X-Cradle-Pipeline` | Pre-v2 wrap-stream entries stored empty usage (the wrap-stream usage fix). `pipeline_version` bumped v1→v2 so they miss and age out | Ensure the running pipeline is at least `v2` (current default `v3`); old entries expire on TTL. |
 | High latency on hits | `cradle_latency_seconds{stage}` | `l1` slow → disk pressure on `data_dir`; `embed`/`l2` slow → CPU contention (single embed thread) | Move `data_dir` to fast disk; give the box CPU headroom; the embed pool is a single thread by design. |
 | All requests are `MISS`/`BYPASS`, cache never fills | `X-Cradle-Cache`; `cradle_cache_write_skips_total` | Requests uncacheable: `temperature > cache.max_temperature`, streaming+tools / `n!=1` / logprobs (bypass), or write-skips | Confirm client params; bypass is by design for those shapes. |
 | Upstream errors surfaced to clients | `cradle_upstream_errors_total{status}`; `x-cradle-upstream-request-id` on the response | The upstream 4xx/5xx'd; Cradle relays body + `retry-after`/`x-ratelimit-*` | It's an upstream problem. Cradle re-frames 5xx as `502`; the client's backoff has the relayed `retry-after`. |
@@ -474,8 +476,8 @@ bare restart.)
 
 ### 7.2 Invalidate the whole cache the *safe* way — bump `pipeline_version`
 
-`pipeline_version` (default `v2`) folds into the L1 key and the L2 filter. Bumping it
-(e.g. `v2`→`v3`, via `pipeline_version` in config or `CRADLE_PIPELINE_VERSION`) makes
+`pipeline_version` (default `v3`) folds into the L1 key and the L2 filter. Bumping it
+(e.g. `v3`→`v4`, via `pipeline_version` in config or `CRADLE_PIPELINE_VERSION`) makes
 **every** existing entry miss and age out on TTL — no file deletion, reversible by
 setting it back **within the entries' TTL** (they are filtered out, not deleted; the purge
 loop only removes TTL-expired entries). This is the preferred lever after a bad-cache
