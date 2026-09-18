@@ -47,7 +47,12 @@ class ServerSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     host: str = "127.0.0.1"
     port: int = 8000
-    max_body_bytes: int = 1048576
+    # Max request body. 128 MiB: a 1M-token text prompt is ~4-6 MB, but inline
+    # base64 images dominate (~30-45 MB for a handful of photos), so the cap is
+    # sized for multimodal + long-context traffic while still rejecting
+    # gigabyte-scale abuse. A pass-through gateway must not reject requests the
+    # upstream would accept. Lower it for text-only deploys (issue #34).
+    max_body_bytes: int = 134217728
 
 
 class AuthKey(BaseModel):

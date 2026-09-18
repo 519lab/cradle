@@ -264,8 +264,15 @@ planned conversation, not a surprise.
 
 ### 3.3 Request body cap
 
-Bodies over `server.max_body_bytes` (default 1 MiB) get a `413`. Raise it in config if a
-legitimate client sends larger prompts.
+Bodies over `server.max_body_bytes` (default **128 MiB**) get a `413`
+`payload_too_large`. The default is sized for real LLM traffic — a 1M-token text prompt is
+~4–6 MB, and a multimodal request with inline base64 images is ~30–45 MB for a handful of
+photos — so a valid long-context or vision request is not rejected. **Lower it** for a
+text-only deploy that wants a tighter DoS backstop. An oversized request is rejected on its
+declared `Content-Length` before the body is buffered; a chunked request with no
+`Content-Length`, however, is fully read before the backstop check — put a reverse proxy
+(`client_max_body_size`) in front if that matters, and note a single worker holding several
+concurrent large bodies uses that much memory.
 
 ---
 

@@ -200,7 +200,7 @@ def test_pass_through_client_auth(tmp_path, monkeypatch: pytest.MonkeyPatch) -> 
     assert fu.last_authorization == "Bearer test-key-aaaaaaaa"
 
 
-def test_oversized_body(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _small_cap_client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     from cradle.config import ServerSettings
 
     monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
@@ -212,14 +212,61 @@ def test_oversized_body(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         upstream=UpstreamSettings(base_url="http://upstream/v1"),
     )
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_app), base_url="http://upstream")
-    app = create_app(settings=settings, embedder=FakeEmbedder(), http=http)
-    with TestClient(app) as c:
+    return TestClient(create_app(settings=settings, embedder=FakeEmbedder(), http=http))
+
+
+def test_oversized_body_declared_content_length(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A body over the cap is rejected 413 (Content-Length pre-check, issue #34)."""
+    with _small_cap_client(tmp_path, monkeypatch) as c:
         r = c.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer test-key-aaaaaaaa"},
             json={"model": "m", "messages": [{"role": "user", "content": "x" * 200}]},
         )
         assert r.status_code == 413
+        assert r.json()["error"]["code"] == "payload_too_large"
+
+
+def test_oversized_body_backstop_when_content_length_understated(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body that exceeds the cap but declares a small Content-Length still 413s
+    via the post-read backstop (a lying/absent header must not bypass the cap)."""
+    with _small_cap_client(tmp_path, monkeypatch) as c:
+        big = ('{"model":"m","messages":[{"role":"user","content":"' + "x" * 200 + '"}]}').encode()
+        r = c.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer test-key-aaaaaaaa",
+                "Content-Type": "application/json",
+                "Content-Length": "5",  # understated on purpose
+            },
+            content=big,
+        )
+        assert r.status_code == 413
+        assert r.json()["error"]["code"] == "payload_too_large"
+
+
+def test_body_under_cap_passes(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A body under the cap is not rejected by the size guard (sanity)."""
+    from cradle.config import ServerSettings
+
+    monkeypatch.setenv("CRADLE_API_KEY", "test-key-aaaaaaaa")
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        server=ServerSettings(max_body_bytes=1_000_000),
+        auth=AuthSettings(keys=[AuthKey(token_env="CRADLE_API_KEY", tenant_id="t1", user_id="u1")]),
+        features=FeatureFlags(l2=False, cache=False),
+        upstream=UpstreamSettings(base_url="http://upstream/v1"),
+    )
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_app), base_url="http://upstream")
+    with TestClient(create_app(settings=settings, embedder=FakeEmbedder(), http=http)) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer test-key-aaaaaaaa"},
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert r.status_code != 413
 
 
 def test_upstream_connect_error_is_502(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

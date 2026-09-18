@@ -72,8 +72,16 @@ async def chat_completions(request: Request):
     principal = await authenticate(request, rt.settings, rt.principals)
     if isinstance(principal, JSONResponse):
         return principal
+    max_body = rt.settings.server.max_body_bytes
+    # Reject on the declared Content-Length BEFORE buffering the body, so an
+    # oversized request does not get fully read into memory first (issue #34).
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > max_body:
+        return openai_error("payload too large", "invalid_request_error", "payload_too_large", 413)
     raw = await request.body()
-    if len(raw) > rt.settings.server.max_body_bytes:
+    # Backstop for chunked / absent / lying Content-Length (a chunked request with
+    # no Content-Length is still fully buffered before this check — see #34 note).
+    if len(raw) > max_body:
         return openai_error("payload too large", "invalid_request_error", "payload_too_large", 413)
     try:
         body = ChatRequest.model_validate_json(raw)

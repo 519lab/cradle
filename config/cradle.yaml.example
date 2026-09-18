@@ -1,7 +1,7 @@
 server:
   host: 127.0.0.1
   port: 8000
-  max_body_bytes: 1048576
+  max_body_bytes: 134217728   # 128 MiB — fits 1M-token + multimodal (base64 image) bodies; lower for text-only
 
 data_dir: ./data
 
