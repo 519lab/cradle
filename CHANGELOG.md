@@ -54,3 +54,7 @@
 - L2 startup refuses `WEB_CONCURRENCY` / `UVICORN_WORKERS` other than 1.
 - Upstream connection failures return OpenAI JSON 502 instead of an uncaught 500.
 - The `cradle_l2_points` gauge is updated on each L2 write, not only every 300s by the purge loop, so a fresh instance no longer reports 0 L2 points while actively serving semantic hits. The purge loop still reconciles the exact count. (#4)
+
+### Docs
+
+- **README rewritten for a repo visitor.** The front page had accumulated content addressed to reviewers rather than users — a live audit transcript, a PRD-compliance disclaimer (FR-3.1 / `features.structure`), CI-hygiene footnotes about the absent `VOLUME /data` declaration, and a pointer to the internal `CLAUDE.md`. It now reads top-to-bottom as "what Cradle is, how to run it, how to point clients at it, how to control caching," with the quick-start and Docker commands unchanged and the audit and ops sections tightened. No config keys, env vars, metric names, or headers changed — operations reference stays in `RUNBOOK.md`, internals in `DESIGN.md`.
