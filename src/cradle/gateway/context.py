@@ -11,6 +11,10 @@ class RequestContext:
     request_id: str
     principal: Principal
     canonical: CanonicalRequest | None = None
+    # The L1 cache key (l1_key(canonical)), stashed by the pipeline when it
+    # computes it so the request log line can report it without a second full
+    # hash of the prompt body on the hot path. None on the bypass path.
+    l1_cache_key: str | None = None
     layer_hit: Literal["l1", "l2", "miss", "bypass"] = "miss"
     l2_score: float | None = None
     # Set when an L2 candidate passed the cosine gate but the precision guard

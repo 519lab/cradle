@@ -33,6 +33,7 @@ from cradle.gateway.sse import (
     usage_frame,
 )
 from cradle.gateway.writeback import cache_skip_reason, promote_l2_hit, record_from, writeback
+from cradle.logging_setup import log_request
 from cradle.metrics import prometheus as m
 from cradle.normalize import cache_namespace, canonicalize, is_cacheable, l1_key, l2_eligible
 from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suffix
@@ -115,9 +116,17 @@ def _client_auth(ctx: RequestContext) -> str | None:
     return ctx.headers.get("authorization") or None
 
 
-def _upstream_error_response(ctx: RequestContext, exc: UpstreamError) -> JSONResponse:
+def _upstream_error_response(
+    runtime: Runtime, ctx: RequestContext, exc: UpstreamError
+) -> JSONResponse:
     m.upstream_errors.labels(status=str(exc.status)).inc()
     status = 502 if exc.status >= 500 else exc.status
+    # An upstream 429/5xx is the most likely reason someone is watching the logs,
+    # so it must still produce a request line (with the status), not vanish into
+    # uvicorn's access log alone. _observe is deliberately NOT called: it hardcodes
+    # status="200" and would mislabel cradle_requests_total; the error is already
+    # counted in cradle_upstream_errors_total above.
+    log_request(runtime.settings, ctx, None, error_status=status, upstream_status=exc.status)
     # Relay upstream retry/quota headers (retry-after, x-ratelimit-*, request id) so a
     # client's backoff on a 429/503 still works even though Cradle re-frames the body.
     headers = {**_headers(ctx), **exc.headers}
@@ -140,6 +149,9 @@ async def _maybe_embed(runtime: Runtime, text: str, ctx: RequestContext) -> list
         m.latency_seconds.labels(stage="embed").observe(ctx.t_embed_s)
         return vec
     except Exception:
+        # An embed failure silently disables L2 for this request; without the
+        # traceback it is invisible past the counter. Log it (no prompt text).
+        log.warning("embed failed for request %s; L2 read skipped", ctx.request_id, exc_info=True)
         m.embed_errors.inc()
         ctx.t_embed_s = time.perf_counter() - t0
         return None
@@ -164,6 +176,9 @@ async def _rerank_ok(runtime: Runtime, query_text: str, candidate_text: str) -> 
             timeout=runtime.settings.l2.rerank_timeout_s,
         )
     except Exception:  # noqa: BLE001 - fail open on timeout or model error
+        # Fail-open means a possibly-wrong hit is served; the traceback is the
+        # only way to tell a timeout from a model crash. Log it (no prompt text).
+        log.warning("rerank failed; serving the twice-gated hit (fail-open)", exc_info=True)
         m.l2_rerank_fail_open.inc()
         return True, "fail-open"
     if score >= threshold:
@@ -215,6 +230,7 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
     _apply_volatility_guard(runtime, ctx)
 
     key = l1_key(canonical)
+    ctx.l1_cache_key = key  # stash for the request log line (avoid re-hashing)
     # Per-request no-cache/refresh (enhancement #2): skip the read, still write.
     if runtime.l1 is not None and not ctx.cache_no_read:
         t0 = time.perf_counter()
@@ -225,7 +241,7 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             ctx.upstream_prompt_tokens = 0
             if ctx.cache_probe:
                 return _probe(ctx, l1_key=key, l2_eligible=False)
-            return _replay(req, ctx, rec)
+            return _replay(runtime, req, ctx, rec)
 
     vec: list[float] | None = None
     eligible = l2_eligible(canonical, req, runtime.settings) and runtime.qdrant is not None
@@ -263,6 +279,10 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                 if floor is not None and hit.score <= floor:
                     ctx.l2_guard_reason = "audit-floor"
                     m.l2_guard_rejects.labels(reason="audit-floor").inc()
+                    log.debug(
+                        "L2 candidate rejected req=%s key=%s score=%.6f reason=audit-floor floor=%.6f",
+                        ctx.request_id, hit.record.key, hit.score, floor,
+                    )
                     continue
                 # Stage 2 (issue #5): cheap precision guard.
                 reason = guard_reason(canonical.embed_text, hit.record.embed_text)
@@ -270,6 +290,10 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                     ctx.l2_guard_reason = reason
                     m.l2_guard_rejects.labels(reason=reason).inc()
                     _note_candidate(ctx, hit, guard=reason, rerank=None, served=False)
+                    log.debug(
+                        "L2 candidate rejected req=%s key=%s score=%.6f reason=guard:%s",
+                        ctx.request_id, hit.record.key, hit.score, reason,
+                    )
                     continue
                 # Stage 3: cross-encoder rerank for entity swaps the guard cannot
                 # see. Fail-open: an unavailable reranker still serves.
@@ -278,6 +302,11 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                 )
                 ctx.l2_rerank_note = note
                 _note_candidate(ctx, hit, guard=None, rerank=note, served=serve)
+                if not serve:
+                    log.debug(
+                        "L2 candidate rejected req=%s key=%s score=%.6f reason=rerank:%s",
+                        ctx.request_id, hit.record.key, hit.score, note,
+                    )
                 if serve:
                     ctx.l2_guard_reason = None  # a later candidate cleared the guard
                     ctx.layer_hit = "l2"
@@ -303,7 +332,7 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                             served=rec,
                             target=upstream,
                         )
-                    return _replay(req, ctx, rec)
+                    return _replay(runtime, req, ctx, rec)
 
     ctx.layer_hit = "miss"
     if ctx.cache_probe:
@@ -329,8 +358,9 @@ def _probe(ctx: RequestContext, *, l1_key: str | None, l2_eligible: bool) -> JSO
     return probe_response(ctx, _headers(ctx), l1_key=l1_key, l2_eligible=l2_eligible)
 
 
-def _replay(req: ChatRequest, ctx: RequestContext, rec) -> JSONResponse | StreamingResponse:
+def _replay(runtime: Runtime, req: ChatRequest, ctx: RequestContext, rec) -> JSONResponse | StreamingResponse:
     _observe(ctx)
+    log_request(runtime.settings, ctx, rec.response)
     headers = _headers(ctx)
     if req.stream:
         headers["Cache-Control"] = "no-cache"
@@ -380,7 +410,7 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
             runtime.http, target, payload, authorization=_client_auth(ctx)
         )
     except UpstreamError as exc:
-        return _upstream_error_response(ctx, exc)
+        return _upstream_error_response(runtime, ctx, exc)
     ctx.t_upstream_s = time.perf_counter() - t0
     usage = completion.get("usage") or {}
     ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
@@ -406,6 +436,7 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
     elif skip is not None:
         m.cache_write_skips.labels(reason=skip).inc()
     _observe(ctx)
+    log_request(runtime.settings, ctx, out)
     return JSONResponse(out, headers=_headers(ctx))
 
 
@@ -428,7 +459,7 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
             runtime.http, target, payload, authorization=_client_auth(ctx)
         )
     except UpstreamError as exc:
-        return _upstream_error_response(ctx, exc)
+        return _upstream_error_response(runtime, ctx, exc)
     ctx.t_upstream_s = time.perf_counter() - t0
     headers = _sse_headers(ctx)
     if ctx.layer_hit == "bypass":
@@ -436,7 +467,7 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
         # (x-ratelimit-*, request id) so a passthrough response carries quota state.
         headers.update(forwardable_headers(resp.headers))
         return StreamingResponse(
-            _passthrough_bytes(resp, ctx),
+            _passthrough_bytes(runtime, resp, ctx),
             media_type="text/event-stream",
             headers=headers,
         )
@@ -452,12 +483,15 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
     )
 
 
-async def _passthrough_bytes(resp, ctx: RequestContext) -> AsyncIterator[bytes]:
+async def _passthrough_bytes(runtime: Runtime, resp, ctx: RequestContext) -> AsyncIterator[bytes]:
     try:
         async for chunk in resp.aiter_bytes():
             yield chunk
         _observe(ctx)
+        # Bypass never inspects the body (verbatim tee), so no completion text.
+        log_request(runtime.settings, ctx, None)
     except asyncio.CancelledError:
+        log_request(runtime.settings, ctx, None, disconnected=True)
         raise
     finally:
         await resp.aclose()
@@ -544,11 +578,16 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
         elif skip is not None:
             m.cache_write_skips.labels(reason=skip).inc()
         _observe(ctx)
+        log_request(runtime.settings, ctx, completion)
     except asyncio.CancelledError:
         acc.client_connected = False
+        # The success-path line runs after the body streams, so a client that
+        # disconnects mid-stream would otherwise leave no request line at all.
+        log_request(runtime.settings, ctx, None, disconnected=True)
         raise
     except GeneratorExit:
         acc.client_connected = False
+        log_request(runtime.settings, ctx, None, disconnected=True)
         raise
     finally:
         await resp.aclose()

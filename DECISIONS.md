@@ -118,3 +118,61 @@ A config change is a restart. Deploys must copy a compose template to the gitign
 in the image only if the running compose file has the mount. The bake reversal is partial:
 models and the example config are still baked (self-contained image), only the runtime
 config is externalized. Verified end-to-end on the CPU image (see RUNBOOK.md §1.1/§7.1).
+
+## ADR-0004: Structured request logging; prompt/response text is opt-in and off by default
+
+**Date:** 2026-09-18
+**Status:** Accepted
+**Phase:** Operations
+**Deciders:** Greg
+
+### Context
+
+Watching Cradle's logs showed only uvicorn's access lines. Two causes: `__main__.py` started
+uvicorn with no logging configuration, so the `cradle` loggers sat at WARNING and every
+request-path line was dropped before it could escape the process; and the request path emitted
+no lines at all — every per-request fact (cache layer, similarity, guard/rerank outcome,
+per-stage timings, token counts) went only into response headers and Prometheus, never a log.
+Greg asked for configurable logging that can include prompt/completion text or stay
+non-sensitive. DESIGN.md carried a flat "No prompt text in logs," which this ADR reinterprets
+rather than deletes.
+
+### Decision
+
+Add one structured request-completion log line and make verbosity configurable on **two
+independent axes**:
+
+- `logging.level` — how much detail. `INFO` emits one line per request; `DEBUG` adds a line
+  per rejected L2 candidate (guard / rerank / audit-floor), carrying the candidate **key** and
+  score, never the compared texts.
+- `logging.content` — how sensitive. `none` (default) logs only keys, hashes, the cache
+  decision, scores and timings; `prompts` adds the request text; `prompts_and_completions` adds
+  the response text. Logged text is truncated to `logging.max_text_chars`.
+
+The two axes are deliberately not collapsed: a single dial would make `DEBUG` imply dumping
+prompt text, so a production tenant couldn't be debugged without leaking its prompts. All
+potentially-sensitive fields pass through **one redaction helper** (`logging_setup.request_fields`),
+so the "no text at `none`" guarantee lives in one place and is unit-tested on every terminal
+path. `logging.format` defaults to human-readable `key=value` (Greg watches stdout); `json` is
+the opt-in for aggregators. Setup configures only the `cradle` logger tree, leaving uvicorn's
+access log intact.
+
+DESIGN.md's "No prompt text in logs" becomes "**by default**; opt-in via `logging.content`."
+This is the request-path analogue of the existing `l2.audit_log_text` flag.
+
+### Rationale
+
+`content: none` as the default keeps the safe behavior the old flat rule guaranteed, while
+letting Greg raise verbosity deliberately on a scratch instance. One chokepoint plus a
+`content: none` test that asserts no prompt/response text appears on any path turns the
+guarantee from a convention into a regression test. Two swallowed exceptions found in the same
+code (`_maybe_embed`, `_rerank_ok` discarded the traceback into a bare counter) are fixed here
+too — an embed or rerank failure now logs its traceback.
+
+### Consequences
+
+New `logging:` config section and `CRADLE_LOGGING__*` env vars — lock-step material, so
+RUNBOOK.md §4 documents them. `content` above `none` writes PII to the logs; the config
+comment and this ADR mark it. A client that disconnects mid-stream now still emits a request
+line (`disconnected=true`), closing a prior observability hole where the streaming success
+line ran only after the body completed.
