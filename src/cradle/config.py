@@ -142,8 +142,10 @@ class L2Settings(BaseModel):
     query_top_k: int = 5
     # Rerank execution device. "cpu" (default) keeps the thin CPU-only deploy and
     # the ~15-40ms/hit cost. "cuda" runs the cross-encoder on a GPU (~2-5ms, back
-    # under the L2 p99 budget) but requires the onnxruntime-gpu extra
-    # (cradle[rerank-gpu]) and a CUDA host. device_ids selects GPU(s) for cuda.
+    # under the L2 p99 budget) but requires the GPU image (docker/Dockerfile.gpu +
+    # compose.gpu.yml) or the onnxruntime-gpu extra (cradle[rerank-gpu]) on a CUDA
+    # host — "cuda" on the CPU image crash-loops at startup with an actionable
+    # error (rerank.py, issue #31). device_ids selects GPU(s) for cuda.
     rerank_device: str = "cpu"
     rerank_device_ids: list[int] | None = None
     # Verified L2 (gateway/audit.py). After serving an L2 hit, with probability

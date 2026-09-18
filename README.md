@@ -64,6 +64,7 @@ Cradle picks the **backend** from the request `model` via `routes` in `config/cr
 - MIT license. GitHub: `519lab/cradle`. No PyPI in v1.
 - Reconstruction is a prefix/suffix envelope (partial PRD FR-3.1). Structural distillation is off (`features.structure: false`).
 - This is a gateway, not an inference runtime: it does not load a chat model. Upstream is whatever OpenAI-compatible API you configure.
+- **GPU rerank** (`l2.rerank_device: cuda`, ~2–5 ms/hit vs ~15–40 ms on CPU) is a separate image — `docker compose -f docker-compose.yml -f compose.gpu.yml up --build` on a host with an NVIDIA GPU + Container Toolkit. The default image is CPU; `cuda` on it crash-loops with an actionable error. See `RUNBOOK.md` §1.4.
 - **Volatility guard** (`cache.volatility_guard`, default on): prompts that ask about time-sensitive things — "latest version", "current price", "today", weather, news — are cached for `cache.volatile_ttl_s` (default 300 s, `0` = never) instead of 24 h, so a correct-but-stale answer is not replayed all day. The reason is returned as `X-Cradle-Volatile`; an explicit `X-Cradle-Cache-TTL` header always wins.
 
 ## Per-request cache controls
