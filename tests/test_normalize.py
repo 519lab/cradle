@@ -95,9 +95,29 @@ def test_developer_role_allowed() -> None:
     assert c.system_prompt_version != "none"
 
 
-def test_stream_tools_uncacheable() -> None:
+def test_stream_tools_cacheable_by_default() -> None:
+    # #43: stream+tools is cacheable when cache_tool_streams is on (default). The
+    # pipeline tees it verbatim and caches only a no-tool-call response.
     s = Settings()
     req = _req(stream=True, tools=[{"type": "function", "function": {"name": "x"}}])
+    c = canonicalize(req, _p(), s)
+    assert is_cacheable(c, req, s) is True
+
+
+def test_stream_tools_bypass_when_flag_off() -> None:
+    from cradle.config import CacheSettings
+
+    s = Settings(cache=CacheSettings(cache_tool_streams=False))
+    req = _req(stream=True, tools=[{"type": "function", "function": {"name": "x"}}])
+    c = canonicalize(req, _p(), s)
+    assert is_cacheable(c, req, s) is False
+
+
+def test_stream_logprobs_still_uncacheable() -> None:
+    # logprobs stays bypass regardless of cache_tool_streams (cached logprobs
+    # would be wrong on replay).
+    s = Settings()
+    req = _req(stream=True, logprobs=True)
     c = canonicalize(req, _p(), s)
     assert is_cacheable(c, req, s) is False
 

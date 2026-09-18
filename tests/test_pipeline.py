@@ -18,7 +18,12 @@ def test_l1_hit_after_miss(client: TestClient, auth_header: dict[str, str]) -> N
     assert a.json()["choices"][0]["message"]["content"] == b.json()["choices"][0]["message"]["content"]
 
 
-def test_stream_tools_bypass(client: TestClient, auth_header: dict[str, str]) -> None:
+def test_stream_tools_relays_tool_call_and_does_not_cache(
+    client: TestClient, auth_header: dict[str, str]
+) -> None:
+    # #43: stream+tools is now the cacheable passthrough path (MISS, not BYPASS).
+    # The fake upstream emits a tool call for a tools request, so the client must
+    # receive it intact and NOTHING may be cached (a 2nd identical call is MISS).
     payload = {
         "model": "gpt-4o-mini",
         "stream": True,
@@ -27,10 +32,13 @@ def test_stream_tools_bypass(client: TestClient, auth_header: dict[str, str]) ->
     }
     r = client.post("/v1/chat/completions", headers=auth_header, json=payload)
     assert r.status_code == 200
-    assert r.headers["X-Cradle-Cache"] == "BYPASS"
-    assert b"tool_calls" in r.content
+    assert r.headers["X-Cradle-Cache"] == "MISS"
+    assert b"tool_calls" in r.content  # tool call relayed verbatim
     assert b'"name":"x"' in r.content or b'"name": "x"' in r.content
     assert b"data: [DONE]\n\n" in r.content
+    # Second identical call must still MISS — the tool-call response is not cached.
+    r2 = client.post("/v1/chat/completions", headers=auth_header, json=payload)
+    assert r2.headers["X-Cradle-Cache"] == "MISS"
 
 
 def test_stream_connect_error_is_json(client: TestClient, auth_header: dict[str, str]) -> None:

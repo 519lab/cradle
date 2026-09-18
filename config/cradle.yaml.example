@@ -62,6 +62,14 @@ cache:
   # X-Cradle-Cache-TTL always wins. Reason is visible as X-Cradle-Volatile.
   volatility_guard: true
   volatile_ttl_s: 300
+  # Cache tool-enabled STREAMING requests (#43). Off = stream+tools bypasses the
+  # cache entirely (the wrap path can't carry a tool call). On (default) = tee the
+  # response to the client verbatim while accumulating a copy, and cache it only
+  # when it contains NO tool call. Non-streaming tool requests are cached either
+  # way. NOTE: the volatility guard is a regex over user text and does not inspect
+  # tool semantics, so a stateful tool with no time-word ("what's my balance") can
+  # serve a stale cached answer under this flag; set false to disable.
+  cache_tool_streams: true
 
 l2:
   mode: local

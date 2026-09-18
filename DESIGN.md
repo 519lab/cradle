@@ -96,7 +96,7 @@ Locked. Not a menu.
 | 9 | Reconstruction v1 | **Prefix/suffix wrap.** No second LLM. No KV→essay expansion. | Partial FR-3.1. Stream-miss **tees** content; wrap is envelope around already-sent tokens, not a post-hoc rewrite. |
 | 10 | L1 canonicalization | **NFKC + selective whitespace + sorted JSON.** Closed generation-affecting allowlist **plus** sorted dump of remaining extras. | Includes `tool_choice`, `n`, `stop`, `seed`, `response_format`, penalties, `logit_bias`, `max_completion_tokens`. `None`/`[]`/`{}` canonicalized. |
 | 11 | Process model | **uvicorn `--workers 1`**. | Qdrant local is not a multi-writer. Startup **refuses** if `WEB_CONCURRENCY` / `UVICORN_WORKERS` is set to anything other than `1`. |
-| 12 | Streaming cache | **Required in v1.** Hits: `synthesize_sse`. Cacheable misses: wrap-mode tee. **Bypass** (`stream+tools`, `n!=1`, logprobs, images): **raw SSE byte passthrough**. Connect failure before body: JSON OpenAI error, not SSE. | Most clients send `stream: true`. Bypass must remain a pass-through gateway. |
+| 12 | Streaming cache | **Required in v1.** Hits: `synthesize_sse`. Cacheable misses: wrap-mode tee. `stream+tools` (#43): `_passthrough_cache_stream` — verbatim tee to the client + post-stream cache of no-tool-call responses (gated by `cache.cache_tool_streams`). **Bypass** (`n!=1`, `stream+logprobs`, images): **raw SSE byte passthrough**. Connect failure before body: JSON OpenAI error, not SSE. | Most clients send `stream: true` with tools; bypass must remain a pass-through gateway. |
 | 13 | L2 eligibility | **Off when tools non-empty (`[]` counts as empty) or `len(messages) > l2.max_messages` (default 2).** | LiteLLM: semantic cache on agentic/multi-turn replays stale tool calls. **L1 still applies to non-stream tool calls.** `stream=true` **and** tools → **uncacheable** (pass-through; no L1/L2). |
 | 14 | Cosine threshold | **Default 0.90.** Config range intended **0.88–0.93**. Clamp **min 0.85**. | PRD: <0.85 → false hits. Optional `@pytest.mark.embed` pair set validates 0.90 against real BGE. |
 | 15 | Config format | **YAML file + `CRADLE_*` env overlay** via a custom pydantic-settings source. | YAML is not native; PR 1 implements the source. Secrets only in env. |
@@ -490,8 +490,10 @@ def is_cacheable(
         return False
     if has_non_text_parts(req.messages):      # image_url etc.
         return False
-    if req.stream and canonical.has_tools:
-        return False                          # stream+tools: pass-through, no L1/L2
+    if req.stream and req.logprobs:
+        return False                          # cached logprobs wrong on replay
+    if req.stream and canonical.has_tools and not settings.cache.cache_tool_streams:
+        return False                          # #43: stream+tools cacheable unless flag off
     return True
 
 def l2_eligible(
@@ -512,7 +514,7 @@ def l2_eligible(
 
 `has_tools` is false when `tools` is `None` or `[]`.
 
-**stream+tools:** uncacheable. Tests must **not** expect HIT-L1 for `tools` + `stream: true`. Non-stream tool calls **are** L1-cacheable (hash includes tools + tool_choice).
+**stream+tools (#43, ADR-0006):** cacheable when `cache.cache_tool_streams` is on (default) — routed to `_passthrough_cache_stream`, which tees the response to the client **verbatim** (a tool call relays intact) while accumulating a copy, and caches **only** a no-tool-call response, in the same `merge()`-reconstructed representation the JSON path stores (JSON and stream share a key — `stream` is excluded from `hash_input`). Fail-closed: caches only on a parsed terminal `finish_reason in {stop,eos}`, no error, no tool call, no delta key outside `{role,content,tool_calls}`, no unparseable framing, client still connected. Tool requests are **L1-only** (`l2_eligible` excludes `has_tools`). With the flag off, or for `stream+logprobs`, the request BYPASSes. Non-stream tool calls **are** L1-cacheable (hash includes tools + tool_choice).
 
 ---
 
@@ -666,7 +668,7 @@ def sampling_fingerprint(c: CanonicalRequest) -> str:
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 ```
 
-Tests (`tests/test_normalize.py`): `response_format`, `seed`, `tool_choice` must not collide; `tools: []` vs `tools: null` **must** collide (same key); unknown extra `foo=1` vs `foo=2` must not collide; extra fields must appear on the fake upstream; two non-stream tool requests that differ only in `messages[].tool_calls` must not share an L1 key; `stream+tools` remains BYPASS. `tests/test_l2.py`: `logprobs` / `logit_bias` / one extras field mismatch must not L2-hit (fingerprint).
+Tests (`tests/test_normalize.py`): `response_format`, `seed`, `tool_choice` must not collide; `tools: []` vs `tools: null` **must** collide (same key); unknown extra `foo=1` vs `foo=2` must not collide; extra fields must appear on the fake upstream; two non-stream tool requests that differ only in `messages[].tool_calls` must not share an L1 key; `stream+tools` is cacheable (#43) — MISS then HIT-L1 for a no-tool-call response, MISS (never cached) for a tool-call response; BYPASS only with `cache_tool_streams` off or `stream+logprobs`. `tests/test_l2.py`: `logprobs` / `logit_bias` / one extras field mismatch must not L2-hit (fingerprint).
 
 ### Canonicalization rules (`cradle/normalize.py`)
 

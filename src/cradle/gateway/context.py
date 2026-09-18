@@ -52,3 +52,8 @@ class RequestContext:
     # Verified L2 (gateway/audit.py): this L2 hit was sampled for a background
     # audit against a fresh upstream answer. Surfaced as X-Cradle-Audit.
     audit_scheduled: bool = False
+    # A cacheable stream+tools miss (#43): the response is teed to the client
+    # verbatim (so a tool call relays intact) while a copy is accumulated, then
+    # cached only if no tool call occurred. layer_hit stays "miss"; this flag is
+    # the orthogonal wire strategy that routes to _passthrough_cache_stream.
+    cacheable_passthrough_stream: bool = False
