@@ -32,7 +32,13 @@ from cradle.gateway.sse import (
     synthesize_sse,
     usage_frame,
 )
-from cradle.gateway.writeback import cache_skip_reason, promote_l2_hit, record_from, writeback
+from cradle.gateway.writeback import (
+    cache_skip_reason,
+    passthrough_skip_reason,
+    promote_l2_hit,
+    record_from,
+    writeback,
+)
 from cradle.logging_setup import log_request
 from cradle.metrics import prometheus as m
 from cradle.normalize import cache_namespace, canonicalize, is_cacheable, l1_key, l2_eligible
@@ -598,18 +604,17 @@ async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: Stre
         **acc.extra_top,
     }
     ttl = _effective_ttl(runtime, ctx)
-    # Fail-closed gate: every condition must hold, or we cache nothing.
-    skip = cache_skip_reason(completion)
-    if ctx.cache_no_store or ttl == 0:
-        skip = skip or "no_store"
-    if acc.tool_call_seen:
-        skip = skip or "tool_call"
-    if acc.error:
-        skip = skip or "upstream_error"
-    if acc.cache_disabled:
-        skip = skip or "unsupported_stream"
-    if not acc.saw_done:
-        skip = skip or "incomplete_stream"
+    # Fail-closed gate: every condition must hold, or we cache nothing. The ordered
+    # reason logic (root cause before shape artifact) lives in passthrough_skip_reason
+    # so it is unit-testable without a live stream.
+    skip = passthrough_skip_reason(
+        completion=completion,
+        error=acc.error,
+        cache_disabled=acc.cache_disabled,
+        saw_done=acc.saw_done,
+        tool_call_seen=acc.tool_call_seen,
+        no_store=(ctx.cache_no_store or ttl == 0),
+    )
     if acc.client_connected and ctx.canonical is not None and skip is None:
         rec = record_from(
             ctx.canonical,

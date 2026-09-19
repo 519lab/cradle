@@ -98,9 +98,15 @@ async def completions(request: Request):
             if model == "reasoning-stream":
                 # A delta field outside {role,content,tool_calls} (#43 allowlist):
                 # reaches the client but can't be replayed from cache → not cached.
+                # Shape matches a real reasoning model (llama.cpp muse-glimmer): the
+                # reasoning deltas precede content, and finish_reason:"stop" arrives
+                # on its OWN terminal empty-delta chunk — the case where the parse
+                # short-circuit drops finish_reason and the skip reason must still be
+                # reported as unsupported_stream, not the misleading finish_None.
                 yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]})}\n\n'
-                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"reasoning":"thinking..."},"finish_reason":None}]})}\n\n'
-                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"reasoning_content":"thinking..."},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
             if body.get("tools"):
