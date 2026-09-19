@@ -136,36 +136,40 @@ def test_stream_written_entry_replays_to_json_identically(make_client, auth_head
 # 4. Fail-closed --------------------------------------------------------------
 
 
-def test_unknown_delta_field_not_cached(make_client, auth_header):
-    # A 'reasoning_content' delta reaches the client but can't be replayed
-    # content-only. The reasoning deltas precede content and finish_reason:"stop"
-    # arrives on its own terminal chunk (real muse-glimmer/llama.cpp shape), so the
-    # parse short-circuit leaves finish_reason uncaptured. The response must still
-    # not cache, AND the recorded skip reason must be the true root cause
-    # (unsupported_stream), not the misleading finish_None the naive gate order gave.
-    from cradle.metrics import prometheus as m
-
+def test_reasoning_stream_caches_and_replays_reasoning(make_client, auth_header):
+    # A reasoning model emits reasoning_content deltas alongside content. These are
+    # auxiliary (not a tool call, not answer text) so the response IS cacheable
+    # (#46/#49); the reasoning is accumulated, stored, and replayed on its own frame
+    # so a cache HIT carries the thinking just like the live MISS did.
     c = make_client()
 
-    def skip(reason: str) -> float:
-        return m.cache_write_skips.labels(reason=reason)._value.get()
-
-    before_unsupported = skip("unsupported_stream")
-    before_finish_none = skip("finish_None")
-
     r1 = _stream(c, auth_header, "reasoning-stream", "think then answer")
-    assert b"reasoning_content" in r1.content   # client saw the reasoning verbatim
-    r2 = _stream(c, auth_header, "reasoning-stream", "think then answer")
-    assert r2.headers["X-Cradle-Cache"] == "MISS"  # not cached (allowlist tripped)
+    assert r1.headers["X-Cradle-Cache"] == "MISS"
+    assert b"reasoning_content" in r1.content   # client saw the reasoning on the miss
+    assert b"answer" in r1.content              # and the content answer
 
-    # The recorded reason is the true root cause (the un-cacheable reasoning delta),
-    # not a downstream artifact. NOTE: whether the mislabel actually occurs depends
-    # on chunk-arrival timing (see test_gate_root_cause_before_shape_artifact for the
-    # transport-independent proof); over in-process ASGI the whole body arrives in one
-    # buffer so the terminal finish_reason is still parsed. Here we assert the correct
-    # label is used and finish_None is not.
-    assert skip("unsupported_stream") > before_unsupported
-    assert skip("finish_None") == before_finish_none
+    r2 = _stream(c, auth_header, "reasoning-stream", "think then answer")
+    assert r2.headers["X-Cradle-Cache"] == "HIT-L1"   # now cacheable
+    assert b"reasoning_content" in r2.content   # replay carries the reasoning too
+    assert b"answer" in r2.content              # and the answer
+
+
+def test_wrap_path_forwards_and_caches_reasoning(make_client, auth_header):
+    # #49: a reasoning model on a PLAIN stream (no tools) hits the wrap path, which
+    # rebuilds the client stream from parsing. It previously DROPPED reasoning from
+    # the live client and cached the stripped answer. Now the client sees reasoning
+    # on the live miss, and the cache HIT replays it too.
+    c = make_client()
+
+    r1 = _stream(c, auth_header, "reasoning-wrap-stream", "think", tools=None)
+    assert r1.headers["X-Cradle-Cache"] == "MISS"
+    assert b"reasoning_content" in r1.content   # live client now sees the thinking
+    assert b"answer" in r1.content
+
+    r2 = _stream(c, auth_header, "reasoning-wrap-stream", "think", tools=None)
+    assert r2.headers["X-Cradle-Cache"] == "HIT-L1"
+    assert b"reasoning_content" in r2.content   # replay is faithful, not stripped
+    assert b"answer" in r2.content
 
 
 def test_incomplete_stream_not_cached(make_client, auth_header):
@@ -196,15 +200,40 @@ def test_logprobs_stream_still_bypass(make_client, auth_header):
 # 6. Fail-closed unit tests on the accumulator + gate (edge branches) ---------
 
 
-def test_accumulator_flags_unknown_delta_and_bad_payload():
+def test_accumulator_delta_classification():
+    """3-way classification: A replays as-is, B (reasoning) accumulates + caches,
+    C disables caching."""
     from cradle.gateway.sse import StreamAccumulator, parse_and_accumulate
 
+    # A: plain content is cacheable
     acc = StreamAccumulator(outbound_id="o", outbound_created=1, model="m")
     parse_and_accumulate('data: {"choices":[{"delta":{"content":"hi"}}]}', acc)
-    assert acc.cache_disabled is False           # plain content is fine
-    parse_and_accumulate('data: {"choices":[{"delta":{"reasoning":"x"}}]}', acc)
-    assert acc.cache_disabled is True            # unknown delta key trips it
+    assert acc.cache_disabled is False
 
+    # B: reasoning does NOT disable — it is accumulated and the key is remembered
+    for key in ("reasoning", "reasoning_content"):
+        b = StreamAccumulator(outbound_id="o", outbound_created=1, model="m")
+        parse_and_accumulate(f'data: {{"choices":[{{"delta":{{"{key}":"thinking"}}}}]}}', b)
+        assert b.cache_disabled is False
+        assert b.reasoning == "thinking"
+        assert b.reasoning_key == key
+        assert b.last_reasoning == "thinking"
+
+    # C: a genuinely unreplayable field still disables
+    c = StreamAccumulator(outbound_id="o", outbound_created=1, model="m")
+    parse_and_accumulate('data: {"choices":[{"delta":{"refusal":"no"}}]}', c)
+    assert c.cache_disabled is True
+
+    # C wins over B: a delta with both reasoning and a category-C key disables AND
+    # does not accumulate reasoning (classify-all-keys-before-acting).
+    mixed = StreamAccumulator(outbound_id="o", outbound_created=1, model="m")
+    parse_and_accumulate(
+        'data: {"choices":[{"delta":{"reasoning_content":"t","refusal":"no"}}]}', mixed
+    )
+    assert mixed.cache_disabled is True
+    assert mixed.reasoning == ""
+
+    # Bad payloads still disable
     acc2 = StreamAccumulator(outbound_id="o", outbound_created=1, model="m")
     parse_and_accumulate("data: not-json{", acc2)
     assert acc2.cache_disabled is True           # unparseable frame

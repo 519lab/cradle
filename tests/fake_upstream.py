@@ -109,6 +109,15 @@ async def completions(request: Request):
                 yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
+            if model == "reasoning-wrap-stream":
+                # A reasoning model on a PLAIN stream (no tools) -> the wrap path.
+                # reasoning_content precedes content; finish on its own chunk (#49).
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"reasoning_content":"let me think"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":None}]})}\n\n'
+                yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})}\n\n'
+                yield "data: [DONE]\n\n"
+                return
             if body.get("tools"):
                 role = {
                     "id": "chatcmpl-fake",

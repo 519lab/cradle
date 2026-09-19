@@ -33,6 +33,18 @@ def content_frame(acc_id: str, created: int, model: str, text: str) -> dict[str,
     return obj
 
 
+def reasoning_frame(
+    acc_id: str, created: int, model: str, text: str, *, key: str = "reasoning_content"
+) -> dict[str, Any]:
+    """A reasoning delta (a model's thinking). Emitted before content frames so a
+    replay matches the real upstream shape. ``key`` preserves whichever name the
+    upstream used (``reasoning_content`` or ``reasoning``)."""
+    obj = _base(acc_id, created, model)
+    obj["choices"][0]["delta"] = {key: text}
+    obj["choices"][0]["finish_reason"] = None
+    return obj
+
+
 def role_frame(acc_id: str, created: int, model: str) -> dict[str, Any]:
     obj = _base(acc_id, created, model)
     obj["choices"][0]["delta"] = {"role": "assistant"}
@@ -66,13 +78,19 @@ def usage_frame(
 # unlike `id`/`created`, which are deliberately local, these carry upstream truth the
 # caller may need (e.g. `system_fingerprint` for reproducibility audits).
 PASS_THROUGH_TOP_FIELDS = ("system_fingerprint", "service_tier")
-# Delta fields the content-only cache representation can faithfully replay (#43).
-# A streaming delta carrying anything else (legacy function_call, refusal,
-# reasoning, annotations, audio, …) would reach the live client but disappear on
-# a cache HIT, so it disables caching for that response. `tool_calls` is here so
-# it doesn't trip the allowlist on its own — it is gated separately via
-# tool_call_seen (a tool-call response is never cached anyway).
+# Delta fields the content-only cache representation replays as-is (#43).
+# `tool_calls` is here so it doesn't trip the allowlist on its own — it is gated
+# separately via tool_call_seen (a tool-call response is never cached anyway).
 _CACHEABLE_DELTA_KEYS = frozenset({"role", "content", "tool_calls"})
+# Reasoning deltas (a model's thinking). Auxiliary, not semantically load-bearing:
+# they are accumulated, stored, and replayed on their own frame (#46/#49), so they
+# do NOT disable caching. Two source key names are seen in the wild; both fold to
+# category B and the observed key is preserved for faithful replay. Ordered (not a
+# set) so that if a message ever carried both, replay is deterministic and prefers
+# the canonical `reasoning_content`.
+_REASONING_DELTA_KEYS: tuple[str, ...] = ("reasoning_content", "reasoning")
+# Any delta key outside A ∪ B (legacy function_call, refusal, annotations, audio, …)
+# genuinely changes meaning if dropped, so it still disables caching (fail-closed).
 # `id`/`created` are deliberately local on the wrap path (DESIGN.md wrap contract);
 # they must never be forwarded, so they must never enter the pass-through allowlist.
 assert not ({"id", "created", "object"} & set(PASS_THROUGH_TOP_FIELDS))
@@ -97,6 +115,15 @@ class StreamAccumulator:
     model: str
     role: str = "assistant"
     content_parts: list[str] = field(default_factory=list)
+    # Reasoning deltas (a reasoning model's thinking), accumulated separately from
+    # content so they can be stored and replayed on their own SSE frame (#46/#49).
+    # reasoning_key remembers whichever name upstream used ("reasoning_content" or
+    # "reasoning"); last_reasoning is the chunk parsed from the most recent line, so
+    # the wrap path can emit a reasoning frame for it (parse_and_accumulate's return
+    # value is reserved for the content tee — see its docstring).
+    reasoning_parts: list[str] = field(default_factory=list)
+    reasoning_key: str | None = None
+    last_reasoning: str | None = None
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
     saw_done: bool = False
@@ -118,6 +145,10 @@ class StreamAccumulator:
     @property
     def content(self) -> str:
         return "".join(self.content_parts)
+
+    @property
+    def reasoning(self) -> str:
+        return "".join(self.reasoning_parts)
 
 
 def parse_and_accumulate(line: str, acc: StreamAccumulator) -> str | None:
@@ -162,15 +193,26 @@ def parse_and_accumulate(line: str, acc: StreamAccumulator) -> str | None:
         acc.finish_reason = finish
     if delta.get("tool_calls"):
         acc.tool_call_seen = True
-    # Allowlist for the content-only cache representation (#43): any delta field
-    # beyond role/content/tool_calls (legacy function_call, refusal, reasoning,
-    # annotations, audio, …) would reach the MISS client but vanish on a HIT
-    # replay, so it disables caching. tool_calls is covered by tool_call_seen.
+    # 3-way delta classification. Classify ALL keys before acting, so a delta
+    # carrying both a reasoning key and a category-C key (e.g. refusal) disables
+    # caching and does NOT pollute reasoning_parts. Category A (role/content/
+    # tool_calls) replays as-is; category B (reasoning) is accumulated + replayed on
+    # its own frame; anything else disables caching (fail-closed, #43/#46/#49).
+    acc.last_reasoning = None
     if isinstance(delta, dict):
-        for k in delta:
-            if k not in _CACHEABLE_DELTA_KEYS:
-                acc.cache_disabled = True
-                break
+        has_c_key = any(
+            k not in _CACHEABLE_DELTA_KEYS and k not in _REASONING_DELTA_KEYS for k in delta
+        )
+        if has_c_key:
+            acc.cache_disabled = True
+        else:
+            for k in _REASONING_DELTA_KEYS:
+                r = delta.get(k)
+                if isinstance(r, str) and r:
+                    acc.reasoning_parts.append(r)
+                    acc.reasoning_key = k
+                    acc.last_reasoning = r
+                    break
     if isinstance(obj.get("usage"), dict):
         acc.usage = obj["usage"]
     content = delta.get("content")
@@ -191,6 +233,17 @@ def synthesize_sse(record: CacheRecord, *, include_usage: bool) -> Iterator[byte
     finish = (choices[0] or {}).get("finish_reason") or "stop"
     extra = {f: resp[f] for f in PASS_THROUGH_TOP_FIELDS if resp.get(f) is not None}
     yield encode_chunk(role_frame(rec_id, created, model))
+    # Reasoning frames precede content, matching the real upstream shape, so a cache
+    # HIT replay carries the thinking a live stream would (#46/#49). The stored
+    # message uses whichever key the upstream emitted; replay preserves it.
+    for rkey in _REASONING_DELTA_KEYS:
+        reasoning = message.get(rkey)
+        if isinstance(reasoning, str) and reasoning:
+            for i in range(0, len(reasoning), 16):
+                yield encode_chunk(
+                    reasoning_frame(rec_id, created, model, reasoning[i : i + 16], key=rkey)
+                )
+            break
     for i in range(0, len(body), 16):
         yield encode_chunk(content_frame(rec_id, created, model, body[i : i + 16]))
     yield encode_chunk(finish_frame(rec_id, created, model, finish))

@@ -28,6 +28,7 @@ from cradle.gateway.sse import (
     error_frame,
     finish_frame,
     parse_and_accumulate,
+    reasoning_frame,
     role_frame,
     synthesize_sse,
     usage_frame,
@@ -588,6 +589,12 @@ async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: Stre
     body = wrap_content(compressed.template, acc.content)
     usage = acc.usage or {}
     ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
+    message: dict[str, Any] = {"role": "assistant", "content": body}
+    # Store reasoning RAW (not through wrap_content — brand prefix/suffix are for the
+    # answer only) under the key the upstream used, so a cache HIT replays the
+    # thinking faithfully, matching the JSON path (#46/#49).
+    if acc.reasoning and acc.reasoning_key:
+        message[acc.reasoning_key] = acc.reasoning
     completion = {
         "id": acc.outbound_id,
         "object": "chat.completion",
@@ -596,7 +603,7 @@ async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: Stre
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": body},
+                "message": message,
                 "finish_reason": acc.finish_reason,
             }
         ],
@@ -650,6 +657,21 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
                 yield encode_chunk(error_frame("unexpected tool_calls on wrap path"))
                 yield encode_done()
                 return
+            # Forward reasoning to the client on its own frame (#49). Previously the
+            # wrap path dropped reasoning entirely — parse_and_accumulate returns only
+            # content, so a reasoning model's thinking never reached the client and
+            # the stripped answer was cached. last_reasoning is the reasoning chunk
+            # (if any) from this line.
+            if acc.last_reasoning:
+                yield encode_chunk(
+                    reasoning_frame(
+                        outbound_id,
+                        outbound_created,
+                        req.model,
+                        acc.last_reasoning,
+                        key=acc.reasoning_key or "reasoning_content",
+                    )
+                )
             if piece:
                 yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, piece))
         if acc.finish_reason is None:
@@ -672,6 +694,11 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
         usage = acc.usage or {}
         ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
         body = wrap_content(compressed.template, acc.content)
+        message: dict[str, Any] = {"role": "assistant", "content": body}
+        # Store reasoning raw so a cache HIT replays the thinking the live client
+        # just saw (#49). Same representation the passthrough and JSON paths use.
+        if acc.reasoning and acc.reasoning_key:
+            message[acc.reasoning_key] = acc.reasoning
         completion = {
             "id": outbound_id,
             "object": "chat.completion",
@@ -680,7 +707,7 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": body},
+                    "message": message,
                     "finish_reason": acc.finish_reason,
                 }
             ],

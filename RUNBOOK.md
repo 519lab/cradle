@@ -23,11 +23,12 @@ effect on `docker compose restart` with no rebuild (`pipeline_version` change re
 in `/probe`); a `#27`-shape dead key crashes config load on restart and is recovered by
 removing it; and a fresh-clone `up` (no host `cradle.yaml`) comes up healthy on defaults
 without compose auto-creating a `config/cradle.yaml` directory. The GPU image's identical
-mount was not re-driven (only the compose file is validated for it). **§5 (write-skip
-reasons)** was verified on 2026-09-18 against a live instance running a reasoning model
-(`meta/muse-glimmer-30B` on llama.cpp): a streaming tool request whose response carries
-`reasoning_content` deltas is not cached and increments `cradle_cache_write_skips_total`
-— now under `reason="unsupported_stream"` (previously the misleading `finish_None`).*
+mount was not re-driven (only the compose file is validated for it). **Reasoning-model
+streaming** was verified on 2026-09-18 against a live instance running a reasoning model
+(`meta/muse-glimmer-30B` on llama.cpp), Cradle built from this branch: a plain stream
+now **forwards `reasoning_content` to the client** (330 reasoning frames on a live miss;
+previously stripped) and **caches + replays** it (MISS→HIT-L1, reasoning present in both);
+so reasoning no longer produces `unsupported_stream` write-skips (#46/#49).*
 
 > **Keeping this current is not optional.** Any change touching a config key, an env
 > var, a metric name, a health/readiness condition, a capacity limit, or a per-request
@@ -320,7 +321,7 @@ private registry — only `cradle_*` series appear.
 | `cradle_l2_guard_rejects_total{reason}` | Near-miss L2 candidates the precision guard / `audit-floor` blocked (numbers/negation/entity/audit-floor). Healthy — the cache refusing wrong hits. |
 | `cradle_l2_rerank_rejects_total` | Entity-swap candidates the cross-encoder blocked. Healthy. |
 | `cradle_l2_rerank_fail_open_total` | L2 hits served **without** rerank verification (reranker unavailable/timed out). **Should stay ~flat.** A climbing rate = rerank is effectively off and wrong hits can slip; investigate the reranker. |
-| `cradle_cache_write_skips_total{reason}` | Responses the write-quality gate refused to cache (empty/`length`/`content_filter`/`tool_call`/`unsupported_stream`/`incomplete_stream`/`upstream_error`/`no_store`). A spike in `length`/empty = upstream returning junk (see §5, #24). A steady `unsupported_stream` on a streaming tool path = the upstream model emits reasoning/other non-content deltas that can't be cached content-only (e.g. a reasoning model); expected, not a bug. |
+| `cradle_cache_write_skips_total{reason}` | Responses the write-quality gate refused to cache (empty/`length`/`content_filter`/`tool_call`/`unsupported_stream`/`incomplete_stream`/`upstream_error`/`no_store`). A spike in `length`/empty = upstream returning junk (see §5, #24). `unsupported_stream` = a streaming delta carried a field the content-only cache can't replay (legacy `function_call`, `refusal`, …); **reasoning deltas no longer trip this** — they are cached and replayed (#46/#49). |
 | `cradle_l2_audit_total{verdict}` | If `l2.audit_rate>0`: **measured false-hit rate** on real traffic. Watch `disagree`; it is the real wrong-hit signal. `error` = the audit's own upstream call failed. |
 | `cradle_l2_audit_answer_score{judge}` | Distribution of judge scores; calibration input for thresholds. |
 | `cradle_volatile_prompts_total{reason}` | How often the volatility guard applied a short TTL. |
