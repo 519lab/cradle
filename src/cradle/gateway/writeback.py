@@ -41,6 +41,49 @@ def cache_skip_reason(completion: dict[str, Any]) -> str | None:
     return None
 
 
+def passthrough_skip_reason(
+    *,
+    completion: dict[str, Any],
+    error: bool,
+    cache_disabled: bool,
+    saw_done: bool,
+    tool_call_seen: bool,
+    no_store: bool,
+) -> str | None:
+    """Ordered skip-reason gate for the tool-stream passthrough path (#43).
+
+    Order matters: the recorded reason must name the ROOT cause. When the stream
+    accumulator aborts mid-stream (``error`` or ``cache_disabled``), it stops
+    parsing, so ``finish_reason``/``saw_done`` are never captured and the
+    reconstructed ``completion`` is incomplete *by construction*. Reading
+    ``cache_skip_reason`` off it would then report a misleading ``finish_None`` /
+    ``incomplete_stream`` that is only a downstream artifact of the abort. So the
+    aborting reasons are checked BEFORE the shape gates that inspect the
+    (necessarily incomplete) completion. Caching still requires every check to
+    pass; only the *reported* reason changes. Returns None when cacheable.
+
+    Motivated by a live observation: a reasoning model (llama.cpp muse-glimmer)
+    emits ``reasoning_content`` deltas, tripping ``cache_disabled`` mid-stream;
+    on the wire the stream still ends with ``finish_reason:"stop"``, yet the old
+    ordering recorded ``finish_None`` because the terminal chunk arrived after the
+    parse short-circuit and was never seen.
+    """
+    if error:
+        return "upstream_error"
+    if cache_disabled:
+        return "unsupported_stream"
+    shape = cache_skip_reason(completion)
+    if shape is not None:
+        return shape
+    if no_store:
+        return "no_store"
+    if tool_call_seen:
+        return "tool_call"
+    if not saw_done:
+        return "incomplete_stream"
+    return None
+
+
 def record_from(
     canonical: CanonicalRequest,
     response: dict[str, Any],
