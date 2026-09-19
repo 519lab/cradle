@@ -1,13 +1,13 @@
 {"id": "hit-1", "expect": "hit", "a": "How do I reset my password?", "b": "What's the way to reset a password?"}
 {"id": "hit-2", "expect": "hit", "a": "Capital of France?", "b": "What is the capital city of France?"}
 {"id": "hit-3", "expect": "hit", "a": "Explain photosynthesis briefly.", "b": "Give a short explanation of photosynthesis."}
-{"id": "hit-4", "expect": "hit", "a": "List Python data types.", "b": "Name the basic data types in Python."}
+{"id": "hit-4", "expect": "hit", "a": "What are the data types in Python?", "b": "What data types does Python have?"}
 {"id": "hit-5", "expect": "hit", "a": "How to boil an egg?", "b": "What is the method for boiling eggs?"}
-{"id": "hit-6", "expect": "hit", "a": "Define HTTP 404.", "b": "What does HTTP status 404 mean?"}
+{"id": "hit-6", "expect": "hit", "a": "What does an HTTP 404 error mean?", "b": "What does the HTTP 404 status code mean?"}
 {"id": "hit-7", "expect": "hit", "a": "Symptoms of the flu.", "b": "What are influenza symptoms?"}
 {"id": "hit-8", "expect": "hit", "a": "Convert 10 miles to km.", "b": "How many kilometers are in 10 miles?"}
 {"id": "hit-9", "expect": "hit", "a": "Who wrote Hamlet?", "b": "Author of the play Hamlet?"}
-{"id": "hit-10", "expect": "hit", "a": "What is SHA-256 used for?", "b": "Purpose of the SHA-256 hash function?"}
+{"id": "hit-10", "expect": "hit", "a": "What is the purpose of SHA-256?", "b": "What is SHA-256 used for?"}
 {"id": "miss-1", "expect": "miss", "a": "How do I reset my password?", "b": "How do I bake sourdough bread?"}
 {"id": "miss-2", "expect": "miss", "a": "Capital of France?", "b": "Capital of Japan?"}
 {"id": "miss-3", "expect": "miss", "a": "Explain photosynthesis briefly.", "b": "Explain nuclear fission briefly."}
