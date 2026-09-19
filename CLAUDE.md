@@ -59,6 +59,6 @@ L2 (Qdrant local) requires a **single** uvicorn worker. `WEB_CONCURRENCY` / `UVI
 ## Layout
 
 `src/cradle/` — gateway, cache, embeddings, compress, reconstruct, upstream, metrics.
-Modules stay ≤ 600 lines. No `ProxyService` god object.
+Modules stay ≤ 600 lines. No `ProxyService` god object. The gateway request path is split: `gateway/pipeline.py` (sequencer + JSON miss), `gateway/stream.py` (streaming miss paths), `gateway/responses.py` (response/observe leaf helpers shared by both).
 
 Design contract: `DESIGN.md`. Product: `PRD.md`. Production operations: `RUNBOOK.md` (ADR-0002) — lock-step material: any change touching a config key, env var, metric name, health/readiness condition, capacity limit, or per-request header updates `RUNBOOK.md` in the same PR, and bumps its "Verified against" date when a command is re-checked against a running instance.

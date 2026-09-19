@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -17,25 +16,22 @@ from cradle.cache.volatility import volatile_reason_for
 from cradle.compress.engine import compress
 from cradle.gateway.audit import schedule_audit, should_audit
 from cradle.gateway.context import RequestContext
-from cradle.gateway.errors import openai_error
 from cradle.gateway.models import ChatMessage, ChatRequest
 from cradle.gateway.probe import candidate_entry, probe_response
-from cradle.gateway.sse import (
-    StreamAccumulator,
-    content_frame,
-    encode_chunk,
-    encode_done,
-    error_frame,
-    finish_frame,
-    parse_and_accumulate,
-    reasoning_frame,
-    role_frame,
-    synthesize_sse,
-    usage_frame,
+from cradle.gateway.responses import (
+    _client_auth,
+    _effective_ttl,
+    _headers,
+    _include_usage,
+    _observe,
+    _upstream_error_response,
 )
+from cradle.gateway.sse import (
+    synthesize_sse,
+)
+from cradle.gateway.stream import _miss_stream
 from cradle.gateway.writeback import (
     cache_skip_reason,
-    passthrough_skip_reason,
     promote_l2_hit,
     record_from,
     writeback,
@@ -43,14 +39,12 @@ from cradle.gateway.writeback import (
 from cradle.logging_setup import log_request
 from cradle.metrics import prometheus as m
 from cradle.normalize import cache_namespace, canonicalize, is_cacheable, l1_key, l2_eligible
-from cradle.reconstruct.merge import merge, wrap_content, wrap_prefix, wrap_suffix
+from cradle.reconstruct.merge import merge
 from cradle.reconstruct.templates import template_for
 from cradle.tokens import count_chat_prompt
 from cradle.upstream.openai import (
     UpstreamError,
     chat,
-    forwardable_headers,
-    start_chat_stream,
 )
 from cradle.upstream.route import resolve_upstream
 
@@ -58,41 +52,6 @@ if TYPE_CHECKING:
     from cradle.runtime import Runtime
 
 log = logging.getLogger("cradle.pipeline")
-
-
-def _headers(ctx: RequestContext) -> dict[str, str]:
-    cache = {
-        "l1": "HIT-L1",
-        "l2": "HIT-L2",
-        "miss": "MISS",
-        "bypass": "BYPASS",
-    }[ctx.layer_hit]
-    h = {
-        "X-Request-ID": ctx.request_id,
-        "X-Cradle-Cache": cache,
-        "X-Cradle-Pipeline": ctx.canonical.pipeline_version if ctx.canonical else "",
-        "X-Cradle-Inbound-Tokens": str(ctx.inbound_prompt_tokens),
-        "X-Cradle-Upstream-Tokens": str(ctx.upstream_prompt_tokens),
-        "X-Cradle-Upstream": ctx.upstream_name,
-    }
-    if ctx.compressed_prompt_tokens is not None:
-        # Present on a genuine miss (JSON and streaming alike), the only path where
-        # compression ran and a saving is meaningful. Absent on hits and bypass so
-        # it is never misread as "compressed to 0" (#52). Compare it to
-        # X-Cradle-Inbound-Tokens (same tokenizer) for the true saving, NOT to
-        # X-Cradle-Upstream-Tokens (a different backend tokenizer + chat template).
-        h["X-Cradle-Compressed-Tokens"] = str(ctx.compressed_prompt_tokens)
-    if ctx.l2_score is not None:
-        h["X-Cradle-Similarity"] = f"{ctx.l2_score:.6f}"
-    if ctx.l2_guard_reason is not None:
-        h["X-Cradle-Guard"] = f"reject:{ctx.l2_guard_reason}"
-    if ctx.l2_rerank_note is not None:
-        h["X-Cradle-Rerank"] = ctx.l2_rerank_note
-    if ctx.volatile_reason is not None:
-        h["X-Cradle-Volatile"] = ctx.volatile_reason
-    if ctx.audit_scheduled:
-        h["X-Cradle-Audit"] = "scheduled"
-    return h
 
 
 def _apply_volatility_guard(runtime: Runtime, ctx: RequestContext) -> None:
@@ -109,11 +68,6 @@ def _apply_volatility_guard(runtime: Runtime, ctx: RequestContext) -> None:
     m.volatile_prompts.labels(reason=reason).inc()
 
 
-def _include_usage(req: ChatRequest) -> bool:
-    opts = req.stream_options or {}
-    return bool(opts.get("include_usage"))
-
-
 def _upstream_payload(req: ChatRequest, messages: list[ChatMessage]) -> dict[str, Any]:
     # Pass-through contract (issue #26): forward only fields the client actually set,
     # so Cradle never injects its own sampling defaults (temperature/top_p/penalties/n)
@@ -124,29 +78,6 @@ def _upstream_payload(req: ChatRequest, messages: list[ChatMessage]) -> dict[str
     payload = req.model_dump(exclude_unset=True, exclude_none=True)
     payload["messages"] = [m.model_dump(exclude_none=True) for m in messages]
     return payload
-
-
-def _client_auth(ctx: RequestContext) -> str | None:
-    return ctx.headers.get("authorization") or None
-
-
-def _upstream_error_response(
-    runtime: Runtime, ctx: RequestContext, exc: UpstreamError
-) -> JSONResponse:
-    m.upstream_errors.labels(status=str(exc.status)).inc()
-    status = 502 if exc.status >= 500 else exc.status
-    # An upstream 429/5xx is the most likely reason someone is watching the logs,
-    # so it must still produce a request line (with the status), not vanish into
-    # uvicorn's access log alone. _observe is deliberately NOT called: it hardcodes
-    # status="200" and would mislabel cradle_requests_total; the error is already
-    # counted in cradle_upstream_errors_total above.
-    log_request(runtime.settings, ctx, None, error_status=status, upstream_status=exc.status)
-    # Relay upstream retry/quota headers (retry-after, x-ratelimit-*, request id) so a
-    # client's backoff on a 429/503 still works even though Cradle re-frames the body.
-    headers = {**_headers(ctx), **exc.headers}
-    if isinstance(exc.body, dict):
-        return JSONResponse(exc.body, status_code=status, headers=headers)
-    return openai_error(str(exc.body), "server_error", "upstream_error", status, headers)
 
 
 async def _maybe_embed(runtime: Runtime, text: str, ctx: RequestContext) -> list[float] | None:
@@ -199,32 +130,6 @@ async def _rerank_ok(runtime: Runtime, query_text: str, candidate_text: str) -> 
         return True, f"pass:{score:.4f}"
     m.l2_rerank_rejects.inc()
     return False, f"reject:{score:.4f}"
-
-
-def _effective_ttl(runtime: Runtime, ctx: RequestContext) -> int:
-    ttl = ctx.cache_ttl_override
-    return ttl if ttl is not None else runtime.settings.cache.ttl_s
-
-
-def _observe(ctx: RequestContext) -> None:
-    m.inbound_prompt_tokens.inc(ctx.inbound_prompt_tokens)
-    m.upstream_prompt_tokens.inc(ctx.upstream_prompt_tokens)
-    m.latency_seconds.labels(stage="l1").observe(ctx.t_l1_s)
-    if ctx.t_l2_s:
-        m.latency_seconds.labels(stage="l2").observe(ctx.t_l2_s)
-    if ctx.t_compress_s:
-        m.latency_seconds.labels(stage="compress").observe(ctx.t_compress_s)
-    if ctx.t_upstream_s:
-        m.latency_seconds.labels(stage="upstream").observe(ctx.t_upstream_s)
-    if ctx.t_reconstruct_s:
-        m.latency_seconds.labels(stage="reconstruct").observe(ctx.t_reconstruct_s)
-    if ctx.layer_hit in {"l1", "l2"}:
-        m.cache_hits.labels(layer=ctx.layer_hit).inc()
-    elif ctx.layer_hit == "miss":
-        m.cache_misses.inc()
-    m.requests_total.labels(
-        endpoint="chat", status="200", cache=ctx.layer_hit
-    ).inc()
 
 
 async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -> JSONResponse | StreamingResponse:
@@ -468,299 +373,3 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
     _observe(ctx)
     log_request(runtime.settings, ctx, out)
     return JSONResponse(out, headers=_headers(ctx))
-
-
-def _sse_headers(ctx: RequestContext) -> dict[str, str]:
-    headers = _headers(ctx)
-    headers["Cache-Control"] = "no-cache"
-    headers["X-Accel-Buffering"] = "no"
-    # On a streaming miss the real upstream token count is only known after the body
-    # has streamed — too late for a response header. Drop it rather than report a
-    # false 0. (It lands in the cache record and the cradle_upstream_prompt_tokens
-    # metric; a later cache-hit replay reports the true value.)
-    headers.pop("X-Cradle-Upstream-Tokens", None)
-    return headers
-
-
-async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> JSONResponse | StreamingResponse:
-    t0 = time.perf_counter()
-    try:
-        resp = await start_chat_stream(
-            runtime.http, target, payload, authorization=_client_auth(ctx)
-        )
-    except UpstreamError as exc:
-        return _upstream_error_response(runtime, ctx, exc)
-    ctx.t_upstream_s = time.perf_counter() - t0
-    headers = _sse_headers(ctx)
-    if ctx.layer_hit == "bypass":
-        # Bypass tees the body verbatim; also relay the allowlisted upstream headers
-        # (x-ratelimit-*, request id) so a passthrough response carries quota state.
-        headers.update(forwardable_headers(resp.headers))
-        return StreamingResponse(
-            _passthrough_bytes(runtime, resp, ctx),
-            media_type="text/event-stream",
-            headers=headers,
-        )
-    if ctx.cacheable_passthrough_stream:
-        # Tool-enabled stream (#43): tee verbatim like bypass (so a tool call relays
-        # intact) but accumulate a copy and cache a no-tool-call response afterward.
-        headers.update(forwardable_headers(resp.headers))
-        acc = StreamAccumulator(
-            outbound_id=f"chatcmpl-{uuid.uuid4().hex}",
-            outbound_created=int(time.time()),
-            model=req.model,
-        )
-        return StreamingResponse(
-            _passthrough_cache_stream(runtime, req, ctx, vec, compressed, resp, acc),
-            media_type="text/event-stream",
-            headers=headers,
-        )
-    outbound_id = f"chatcmpl-{uuid.uuid4().hex}"
-    outbound_created = int(time.time())
-    acc = StreamAccumulator(
-        outbound_id=outbound_id, outbound_created=outbound_created, model=req.model
-    )
-    return StreamingResponse(
-        _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc),
-        media_type="text/event-stream",
-        headers=headers,
-    )
-
-
-async def _passthrough_bytes(runtime: Runtime, resp, ctx: RequestContext) -> AsyncIterator[bytes]:
-    try:
-        async for chunk in resp.aiter_bytes():
-            yield chunk
-        _observe(ctx)
-        # Bypass never inspects the body (verbatim tee), so no completion text.
-        log_request(runtime.settings, ctx, None)
-    except asyncio.CancelledError:
-        log_request(runtime.settings, ctx, None, disconnected=True)
-        raise
-    finally:
-        await resp.aclose()
-
-
-# Cap the line-accumulation buffer for the passthrough-cache path. A single SSE
-# frame far larger than this is treated as unparseable → caching disabled (the
-# client still gets every byte). 4 MiB is generous for a chat completion frame.
-_PASSTHROUGH_LINE_BUF_MAX = 4 * 1024 * 1024
-
-
-async def _passthrough_cache_stream(
-    runtime: Runtime, req, ctx, vec, compressed, resp, acc: StreamAccumulator
-) -> AsyncIterator[bytes]:
-    """Tool-enabled stream (#43): tee upstream bytes to the client VERBATIM while
-    accumulating a copy; cache only a clean, no-tool-call response afterward.
-
-    The client's bytes are never derived from parsing — any accumulation failure
-    only disables caching (acc.cache_disabled), never the stream.
-    """
-    buf = ""
-    try:
-        async for chunk in resp.aiter_bytes():
-            yield chunk  # verbatim to the client, always
-            if acc.cache_disabled:
-                continue  # already un-cacheable; keep teeing, skip parsing
-            try:
-                buf += chunk.decode("utf-8")
-            except UnicodeDecodeError:
-                # A byte boundary split a codepoint, or non-UTF-8: we can't safely
-                # reassemble lines, so stop trusting the accumulation.
-                acc.cache_disabled = True
-                continue
-            if len(buf) > _PASSTHROUGH_LINE_BUF_MAX:
-                acc.cache_disabled = True
-                buf = ""
-                continue
-            # Consume only complete lines; keep the trailing partial in buf.
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                try:
-                    parse_and_accumulate(line, acc)
-                except Exception:  # noqa: BLE001 - aux parsing must never kill the stream
-                    acc.cache_disabled = True
-        # Stream ended. Consider caching iff everything is clean.
-        _observe(ctx)
-        await _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc)
-    except asyncio.CancelledError:
-        acc.client_connected = False
-        log_request(runtime.settings, ctx, None, disconnected=True)
-        raise
-    except GeneratorExit:
-        acc.client_connected = False
-        log_request(runtime.settings, ctx, None, disconnected=True)
-        raise
-    finally:
-        await resp.aclose()
-
-
-async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: StreamAccumulator) -> None:
-    """Fail-closed writeback for the passthrough-cache path (#43)."""
-    # Reconstruct the SAME representation the JSON miss path caches (merge()):
-    # JSON and streaming share a cache key (stream is excluded from hash_input),
-    # so a cross-mode hit must return an identical body.
-    body = wrap_content(compressed.template, acc.content)
-    usage = acc.usage or {}
-    ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
-    message: dict[str, Any] = {"role": "assistant", "content": body}
-    # Store reasoning RAW (not through wrap_content — brand prefix/suffix are for the
-    # answer only) under the key the upstream used, so a cache HIT replays the
-    # thinking faithfully, matching the JSON path (#46/#49).
-    if acc.reasoning and acc.reasoning_key:
-        message[acc.reasoning_key] = acc.reasoning
-    completion = {
-        "id": acc.outbound_id,
-        "object": "chat.completion",
-        "created": acc.outbound_created,
-        "model": req.model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": acc.finish_reason,
-            }
-        ],
-        "usage": usage,
-        **acc.extra_top,
-    }
-    ttl = _effective_ttl(runtime, ctx)
-    # Fail-closed gate: every condition must hold, or we cache nothing. The ordered
-    # reason logic (root cause before shape artifact) lives in passthrough_skip_reason
-    # so it is unit-testable without a live stream.
-    skip = passthrough_skip_reason(
-        completion=completion,
-        error=acc.error,
-        cache_disabled=acc.cache_disabled,
-        saw_done=acc.saw_done,
-        tool_call_seen=acc.tool_call_seen,
-        no_store=(ctx.cache_no_store or ttl == 0),
-    )
-    if acc.client_connected and ctx.canonical is not None and skip is None:
-        rec = record_from(
-            ctx.canonical,
-            completion,
-            ctx.inbound_prompt_tokens,
-            ctx.upstream_prompt_tokens,
-            ttl,
-        )
-        await writeback(runtime, ctx.canonical, vec, rec)
-    elif skip is not None:
-        m.cache_write_skips.labels(reason=skip).inc()
-    log_request(runtime.settings, ctx, completion if skip is None else None)
-
-
-async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccumulator) -> AsyncIterator[bytes]:
-    outbound_id = acc.outbound_id
-    outbound_created = acc.outbound_created
-    try:
-        first = True
-        async for line in resp.aiter_lines():
-            if first:
-                first = False
-                yield encode_chunk(role_frame(outbound_id, outbound_created, req.model))
-                prefix = wrap_prefix(compressed.template)
-                if prefix:
-                    yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, prefix))
-            piece = parse_and_accumulate(line, acc)
-            if acc.error:
-                yield encode_chunk(error_frame(acc.error_payload or "upstream error"))
-                yield encode_done()
-                return
-            if acc.tool_call_seen:
-                yield encode_chunk(error_frame("unexpected tool_calls on wrap path"))
-                yield encode_done()
-                return
-            # Forward reasoning to the client on its own frame (#49). Previously the
-            # wrap path dropped reasoning entirely — parse_and_accumulate returns only
-            # content, so a reasoning model's thinking never reached the client and
-            # the stripped answer was cached. last_reasoning is the reasoning chunk
-            # (if any) from this line.
-            if acc.last_reasoning:
-                yield encode_chunk(
-                    reasoning_frame(
-                        outbound_id,
-                        outbound_created,
-                        req.model,
-                        acc.last_reasoning,
-                        key=acc.reasoning_key or "reasoning_content",
-                    )
-                )
-            if piece:
-                yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, piece))
-        if acc.finish_reason is None:
-            yield encode_chunk(error_frame("upstream stream ended without finish_reason"))
-            yield encode_done()
-            return
-        suffix = wrap_suffix(compressed.template, acc.content)
-        if suffix:
-            yield encode_chunk(content_frame(outbound_id, outbound_created, req.model, suffix))
-        yield encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason))
-        # The client only sees a usage chunk when it asked for one (OpenAI semantics),
-        # even though Cradle always requests usage upstream on the wrap path.
-        if _include_usage(req) and acc.usage:
-            yield encode_chunk(
-                usage_frame(
-                    outbound_id, outbound_created, req.model, acc.usage, acc.extra_top or None
-                )
-            )
-        yield encode_done()
-        usage = acc.usage or {}
-        ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
-        body = wrap_content(compressed.template, acc.content)
-        message: dict[str, Any] = {"role": "assistant", "content": body}
-        # Store reasoning raw so a cache HIT replays the thinking the live client
-        # just saw (#49). Same representation the passthrough and JSON paths use.
-        if acc.reasoning and acc.reasoning_key:
-            message[acc.reasoning_key] = acc.reasoning
-        completion = {
-            "id": outbound_id,
-            "object": "chat.completion",
-            "created": outbound_created,
-            "model": req.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": acc.finish_reason,
-                }
-            ],
-            "usage": acc.usage or {},
-            # Provider metadata (system_fingerprint, service_tier) so a cached replay
-            # carries the same top-level fields a live wrap-stream response does.
-            **acc.extra_top,
-        }
-        ttl = _effective_ttl(runtime, ctx)
-        skip = cache_skip_reason(completion)
-        if ctx.cache_no_store or ttl == 0:
-            skip = skip or "no_store"
-        if (
-            acc.client_connected
-            and ctx.layer_hit != "bypass"
-            and ctx.canonical is not None
-            and skip is None
-        ):
-            rec = record_from(
-                ctx.canonical,
-                completion,
-                ctx.inbound_prompt_tokens,
-                ctx.upstream_prompt_tokens,
-                ttl,
-            )
-            await writeback(runtime, ctx.canonical, vec, rec)
-        elif skip is not None:
-            m.cache_write_skips.labels(reason=skip).inc()
-        _observe(ctx)
-        log_request(runtime.settings, ctx, completion)
-    except asyncio.CancelledError:
-        acc.client_connected = False
-        # The success-path line runs after the body streams, so a client that
-        # disconnects mid-stream would otherwise leave no request line at all.
-        log_request(runtime.settings, ctx, None, disconnected=True)
-        raise
-    except GeneratorExit:
-        acc.client_connected = False
-        log_request(runtime.settings, ctx, None, disconnected=True)
-        raise
-    finally:
-        await resp.aclose()

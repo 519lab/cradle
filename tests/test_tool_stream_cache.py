@@ -299,7 +299,7 @@ def test_function_call_delta_disables_cache():
 
 async def test_maybe_cache_passthrough_gates(tmp_path, api_key, monkeypatch):
     """Direct test of the fail-closed writeback gate: each disqualifier => no cache."""
-    import cradle.gateway.pipeline as pl
+    import cradle.gateway.stream as st
     from cradle.cache.records import Principal
     from cradle.compress.engine import compress
     from cradle.gateway.context import RequestContext
@@ -319,7 +319,7 @@ async def test_maybe_cache_passthrough_gates(tmp_path, api_key, monkeypatch):
     async def _fake_writeback(runtime, canon, vec, rec):
         writes.append(rec)
 
-    monkeypatch.setattr(pl, "writeback", _fake_writeback)
+    monkeypatch.setattr(st, "writeback", _fake_writeback)
 
     class _RT:
         settings = s
@@ -342,7 +342,7 @@ async def test_maybe_cache_passthrough_gates(tmp_path, api_key, monkeypatch):
         return a
 
     # clean -> cached
-    await pl._maybe_cache_passthrough(_RT(), req, _ctx(), None, compressed, _acc())
+    await st._maybe_cache_passthrough(_RT(), req, _ctx(), None, compressed, _acc())
     assert len(writes) == 1
 
     # each disqualifier -> not cached
@@ -354,5 +354,5 @@ async def test_maybe_cache_passthrough_gates(tmp_path, api_key, monkeypatch):
         _acc(saw_done=False),
         _acc(client_connected=False),
     ):
-        await pl._maybe_cache_passthrough(_RT(), req, _ctx(), None, compressed, a)
+        await st._maybe_cache_passthrough(_RT(), req, _ctx(), None, compressed, a)
     assert writes == []

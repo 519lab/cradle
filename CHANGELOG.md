@@ -66,6 +66,10 @@
 - Upstream connection failures return OpenAI JSON 502 instead of an uncaught 500.
 - The `cradle_l2_points` gauge is updated on each L2 write, not only every 300s by the purge loop, so a fresh instance no longer reports 0 L2 points while actively serving semantic hits. The purge loop still reconciles the exact count. (#4)
 
+### Infrastructure
+
+- **`gateway/pipeline.py` split into three modules to restore the ≤600-line rule.** `pipeline.py` had grown to 766 lines — over the project's own module-size limit (asserted as fact in `CLAUDE.md`/`DESIGN.md`, and false). The streaming miss paths (bypass tee, the #43 tool-stream passthrough-cache, and the wrap path) moved to `gateway/stream.py`; the response/observability leaf helpers shared by the JSON and streaming paths (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`, `_client_auth`) moved to `gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Pure code motion — every moved function is byte-identical, the full suite passes unchanged (251), and the three modules are now 375 / 356 / 116 lines. No behavior, config, header, or metric change.
+
 ### Docs
 
 - **README rewritten for a repo visitor.** The front page had accumulated content addressed to reviewers rather than users — a live audit transcript, a PRD-compliance disclaimer (FR-3.1 / `features.structure`), CI-hygiene footnotes about the absent `VOLUME /data` declaration, and a pointer to the internal `CLAUDE.md`. It now reads top-to-bottom as "what Cradle is, how to run it, how to point clients at it, how to control caching," with the quick-start and Docker commands unchanged and the audit and ops sections tightened. No config keys, env vars, metric names, or headers changed — operations reference stays in `RUNBOOK.md`, internals in `DESIGN.md`.
