@@ -75,6 +75,13 @@ def _headers(ctx: RequestContext) -> dict[str, str]:
         "X-Cradle-Upstream-Tokens": str(ctx.upstream_prompt_tokens),
         "X-Cradle-Upstream": ctx.upstream_name,
     }
+    if ctx.compressed_prompt_tokens is not None:
+        # Present on a genuine miss (JSON and streaming alike), the only path where
+        # compression ran and a saving is meaningful. Absent on hits and bypass so
+        # it is never misread as "compressed to 0" (#52). Compare it to
+        # X-Cradle-Inbound-Tokens (same tokenizer) for the true saving, NOT to
+        # X-Cradle-Upstream-Tokens (a different backend tokenizer + chat template).
+        h["X-Cradle-Compressed-Tokens"] = str(ctx.compressed_prompt_tokens)
     if ctx.l2_score is not None:
         h["X-Cradle-Similarity"] = f"{ctx.l2_score:.6f}"
     if ctx.l2_guard_reason is not None:
@@ -393,6 +400,13 @@ async def _miss(
     t0 = time.perf_counter()
     compressed = compress(req.messages, runtime.settings, req.model)
     ctx.t_compress_s = time.perf_counter() - t0
+    # Record the compressed size under Cradle's own tokenizer so the true saving
+    # (inbound - compressed, one accounting) is observable via a header (#52).
+    # Only on a genuine miss: a BYPASS request also flows through _miss (it is an
+    # uncacheable passthrough), but a compression saving is not a meaningful figure
+    # there, so the header stays absent rather than misleading.
+    if ctx.layer_hit == "miss":
+        ctx.compressed_prompt_tokens = compressed.compressed_tokens
     tenant_tmpl = template_for(runtime.settings, ctx.principal.tenant_id)
     compressed.template.brand_prefix = tenant_tmpl.brand_prefix
     compressed.template.brand_suffix = tenant_tmpl.brand_suffix

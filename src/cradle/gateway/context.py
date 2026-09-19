@@ -27,6 +27,14 @@ class RequestContext:
     l2_rerank_note: str | None = None
     inbound_prompt_tokens: int = 0
     upstream_prompt_tokens: int = 0
+    # Prompt tokens after rule-based compression, counted with Cradle's own
+    # tokenizer (the same one as inbound), so inbound - compressed is the TRUE
+    # compression saving under a single accounting. None until the miss path runs
+    # compress(): compression never runs on hits or bypass, and comparing this
+    # against upstream_prompt_tokens (a different backend tokenizer that also
+    # includes the chat template) mixes two accountings and can read as negative
+    # even though compression only ever removes tokens from the payload (#52).
+    compressed_prompt_tokens: int | None = None
     t_l1_s: float = 0.0
     t_embed_s: float = 0.0
     t_l2_s: float = 0.0
