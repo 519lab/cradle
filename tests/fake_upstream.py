@@ -83,6 +83,10 @@ async def completions(request: Request):
                           "created": 1, "model": model,
                           "choices": [{"index": 0, "delta": delta, "finish_reason": fin}]}
                     yield f"data: {json.dumps(ch)}\n\n"
+                if want_usage:
+                    # Emit the OpenAI usage-only terminal chunk so the passthrough-cache
+                    # path can accumulate real upstream prompt_tokens (#59).
+                    yield f'data: {json.dumps({"id":"chatcmpl-fake","object":"chat.completion.chunk","created":1,"model":model,"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
             if model == "tools-mixed-stream":
