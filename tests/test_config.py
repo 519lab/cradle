@@ -73,4 +73,104 @@ def test_example_config_validates(monkeypatch: pytest.MonkeyPatch) -> None:
     assert example.is_file(), f"tracked example config missing at {example}"
     monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
     monkeypatch.setenv("CRADLE_CONFIG", str(example))
-    load_settings()  # raises ValidationError if the example drifts from the schema
+    load_settings()  # raises ConfigError (unknown key) or ValidationError if the example drifts
+
+
+# --- Friendly config errors for stale keys (#61) -----------------------------
+
+
+def _write_yaml(tmp_path: Path, body: str) -> Path:
+    p = tmp_path / "cradle.yaml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_stale_yaml_key_raises_configerror_naming_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead key in the YAML file → ConfigError that names the key AND the file."""
+    from cradle.config import ConfigError
+
+    cfg = _write_yaml(tmp_path, "compress:\n  min_tokens: 16\n")
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(cfg))
+    with pytest.raises(ConfigError) as ei:
+        load_settings()
+    msg = str(ei.value)
+    assert "compress.min_tokens" in msg
+    assert str(cfg) in msg  # points at the real file, not a hardcoded default
+    assert "remove or rename" in msg
+
+
+def test_stale_env_key_message_does_not_claim_its_in_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SAME error loc from an env var must NOT tell the operator to edit the
+    file (the flaw the guard exists to avoid): the key isn't in the YAML."""
+    from cradle.config import ConfigError
+
+    cfg = _write_yaml(tmp_path, "compress:\n  min_savings_ratio: 0.02\n")  # valid file
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(cfg))
+    monkeypatch.setenv("CRADLE_COMPRESS__MIN_TOKENS", "16")  # dead key via env
+    with pytest.raises(ConfigError) as ei:
+        load_settings()
+    msg = str(ei.value)
+    assert "compress.min_tokens" in msg
+    assert f"remove or rename it in {cfg}" not in msg  # must not send them to the file
+    assert "environment" in msg
+
+
+def test_multiple_stale_keys_all_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every extra_forbidden key is surfaced at once (no second round trip)."""
+    from cradle.config import ConfigError
+
+    cfg = _write_yaml(
+        tmp_path,
+        "compress:\n  min_tokens: 16\ncache:\n  evict_old_pipeline: true\n",
+    )
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(cfg))
+    with pytest.raises(ConfigError) as ei:
+        load_settings()
+    msg = str(ei.value)
+    assert "compress.min_tokens" in msg
+    assert "cache.evict_old_pipeline" in msg
+
+
+def test_stale_key_in_list_element_does_not_falsely_claim_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale key inside a list element (loc carries an int index, e.g.
+    routes.0.weight) has no clean env spelling and no flat file key to match, so
+    the message must NOT claim it's absent from the file / an env var — it IS in
+    the file. Regression for the list-walk gap (#61)."""
+    from cradle.config import ConfigError
+
+    cfg = _write_yaml(
+        tmp_path,
+        "upstreams:\n  b1:\n    base_url: http://x/v1\n"
+        "routes:\n  - model: 'gpt*'\n    to: b1\n    weight: 1\n",  # weight is not a RouteRule field
+    )
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(cfg))
+    with pytest.raises(ConfigError) as ei:
+        load_settings()
+    msg = str(ei.value)
+    assert "routes.0.weight" in msg
+    assert "not in" not in msg  # must not claim the in-file key is absent
+    assert str(cfg) in msg  # still points at the file as a place to fix it
+
+
+def test_non_extra_forbidden_error_still_raises_validationerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real validation failure (not a stale key) keeps its ValidationError so its
+    message is not swallowed by the friendly path."""
+    cfg = _write_yaml(tmp_path, "l2:\n  cosine_threshold: 0.5\n")  # below the 0.85 floor
+    monkeypatch.delenv("CRADLE_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CRADLE_CONFIG", str(cfg))
+    with pytest.raises(ValidationError):
+        load_settings()
