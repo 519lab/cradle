@@ -249,12 +249,16 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
     # an aborted leader publishes no partial answer. Resolution is centralised in
     # the finally: completion_out stays None on every early return / exception, so
     # those paths fail() the flight; only a clean finish sets it and finish()es.
+    # abort_reason/abort_body carry the true cause to followers and the metric
+    # (default "leader_disconnect" for an exception; each error return overrides it).
     def _pub(frame: bytes) -> bytes:
         if ctx.flight is not None:
             ctx.flight.publish(frame)
         return frame
 
     completion_out: dict | None = None
+    abort_reason = "leader_disconnect"
+    abort_body: dict | None = None
     try:
         first = True
         async for line in resp.aiter_lines():
@@ -266,10 +270,16 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
                     yield _pub(encode_chunk(content_frame(outbound_id, outbound_created, req.model, prefix)))
             piece = parse_and_accumulate(line, acc)
             if acc.error:
+                abort_reason = "upstream_error"
+                abort_body = {"error": {"message": acc.error_payload or "upstream error",
+                                        "type": "server_error", "code": "upstream_error"}}
                 yield encode_chunk(error_frame(acc.error_payload or "upstream error"))
                 yield encode_done()
                 return
             if acc.tool_call_seen:
+                abort_reason = "unexpected_tool_call"
+                abort_body = {"error": {"message": "unexpected tool_calls on wrap path",
+                                        "type": "server_error", "code": "unexpected_tool_call"}}
                 yield encode_chunk(error_frame("unexpected tool_calls on wrap path"))
                 yield encode_done()
                 return
@@ -291,6 +301,9 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             if piece:
                 yield _pub(encode_chunk(content_frame(outbound_id, outbound_created, req.model, piece)))
         if acc.finish_reason is None:
+            abort_reason = "truncated_stream"
+            abort_body = {"error": {"message": "upstream stream ended without finish_reason",
+                                    "type": "server_error", "code": "truncated_stream"}}
             yield encode_chunk(error_frame("upstream stream ended without finish_reason"))
             yield encode_done()
             return
@@ -375,8 +388,11 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             if completion_out is not None:
                 ctx.flight.finish(completion_out)
             else:
-                m.flight_aborts.labels(reason="leader_disconnect").inc()
-                ctx.flight.fail({
+                # abort_reason/abort_body carry the true cause: upstream_error,
+                # unexpected_tool_call and truncated_stream override the default
+                # leader_disconnect set for a raised CancelledError/GeneratorExit.
+                m.flight_aborts.labels(reason=abort_reason).inc()
+                ctx.flight.fail(abort_body or {
                     "error": {"message": "single-flight leader aborted",
                               "type": "server_error", "code": "upstream_error"}
                 })

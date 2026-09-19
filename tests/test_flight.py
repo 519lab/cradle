@@ -28,6 +28,7 @@ from cradle.config import (
     UpstreamSettings,
 )
 from cradle.embeddings.fake import FakeEmbedder
+from cradle.metrics import prometheus as m
 from tests.fake_rerank import AllowReranker
 
 
@@ -233,6 +234,8 @@ async def test_leader_generator_abort_fails_flight_and_clears_registry(tmp_path,
     assert flight.done.is_set(), "aborted leader must resolve the flight"
     assert flight.error is not None, "abort must FAIL the flight, not finish it"
     assert rt.flights == {}, "aborted leader must clear the registry"
+    # A genuine client disconnect labels leader_disconnect (not upstream_error).
+    assert m.flight_aborts.labels(reason="leader_disconnect")._value.get() >= 1
 
 
 @pytest.mark.asyncio
@@ -305,13 +308,71 @@ async def test_no_cache_request_does_not_coalesce(tmp_path, api_key):
 
 
 @pytest.mark.asyncio
+async def test_no_store_request_does_not_coalesce(tmp_path, api_key):
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        # no-store requests reach BOTH flight seams (unlike bypass), so this is the
+        # eligibility clause with no other coverage. Concurrent no-store requests
+        # must not coalesce (flight_eligible excludes cache_no_store in v1).
+        hdr = {**_auth(api_key), "X-Cradle-Cache-Control": "no-store"}
+        resps = await _assert_no_coalesce_concurrent(app, client, hdr, _body("ns"), 3, up)
+    assert all(r.headers.get("X-Cradle-Flight") is None for r in resps)
+
+
+@pytest.mark.asyncio
 async def test_bypass_request_does_not_coalesce(tmp_path, api_key):
     async with _driver(tmp_path, api_key) as (up, app, client):
-        # n=2 is uncacheable → bypass → never a leader/follower, even concurrently.
+        # n=2 is uncacheable → bypass → returns before the seams. Structural, not via
+        # the predicate; kept as a regression guard that bypass never registers a flight.
         resps = await _assert_no_coalesce_concurrent(
             app, client, _auth(api_key), _body("by", n=2), 3, up
         )
     assert all(r.headers["X-Cradle-Cache"] == "BYPASS" for r in resps)
+
+
+@pytest.mark.asyncio
+async def test_late_join_follower_gets_all_frames(tmp_path, api_key):
+    """A follower that joins AFTER the leader has already published some frames must
+    receive the already-buffered frames then live-tail the rest with none dropped or
+    duplicated at the join boundary (exercises the tail() cursor + event-ordering)."""
+    from cradle.cache.records import Principal
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight, _follow_stream
+    from cradle.gateway.models import ChatMessage, ChatRequest
+
+    s = _settings(tmp_path, api_key)
+    principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+    req = ChatRequest(model="m", stream=True, messages=[ChatMessage(role="user", content="x")])
+    flight = Flight("k:s")
+    flight.followers = 1
+
+    class _RT:
+        settings = s
+
+    ctx = RequestContext(request_id="r", principal=principal)
+    ctx.layer_hit = "miss"
+
+    # Leader has already published two frames before the follower joins.
+    flight.publish(b"data: FRAME-A\n\n")
+    flight.publish(b"data: FRAME-B\n\n")
+
+    gen = _follow_stream(_RT(), req, ctx, flight, timeout=5.0)
+
+    async def leader_continues():
+        await asyncio.sleep(0.02)
+        flight.publish(b"data: FRAME-C\n\n")  # a frame appended WHILE the follower tails
+        await asyncio.sleep(0.02)
+        flight.finish({"id": "o", "created": 1, "model": "m",
+                       "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"},
+                                    "finish_reason": "stop"}], "usage": {}})
+
+    cont = asyncio.ensure_future(leader_continues())
+    chunks = [c async for c in gen]
+    await cont
+    text = b"".join(chunks).decode()
+    # All three frames present, in order, exactly once; then the follower's own [DONE].
+    assert text.count("FRAME-A") == 1 and text.count("FRAME-B") == 1 and text.count("FRAME-C") == 1
+    assert text.index("FRAME-A") < text.index("FRAME-B") < text.index("FRAME-C")
+    assert "data: [DONE]" in text
 
 
 @pytest.mark.asyncio

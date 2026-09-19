@@ -334,7 +334,7 @@ private registry — only `cradle_*` series appear.
 | `cradle_l2_audit_answer_score{judge}` | Distribution of judge scores; calibration input for thresholds. |
 | `cradle_volatile_prompts_total{reason}` | How often the volatility guard applied a short TTL. |
 | `cradle_flight_followers_total` | If `cache.singleflight` on: requests coalesced onto a leader's upstream call — each is an upstream call (and writeback) **saved**. Zero under load means bursts are not identical/homogeneous, or the flag is off. |
-| `cradle_flight_aborts_total{reason}` | Single-flight leaders that failed their followers. `leader_disconnect`/`upstream_error` are expected at low rates; a climbing `timeout` or `stale` means leaders are hanging — investigate before flipping `singleflight` to default-on. |
+| `cradle_flight_aborts_total{reason}` | Single-flight leaders that failed their followers, by cause: `upstream_error` (backend errored mid-stream), `truncated_stream`, `unexpected_tool_call`, `leader_disconnect` (leader's client vanished), `timeout` (follower gave up on a stuck leader), `stale` (a leaked flight was replaced). `upstream_error`/`truncated_stream`/`leader_disconnect` are expected at low rates; climbing `timeout` or `stale` means leaders are hanging — investigate before flipping `singleflight` to default-on. |
 | `cradle_embed_errors_total` | Embedder failures/timeouts → those requests fell through to a real miss. |
 
 Also emitted: `cradle_requests_total{endpoint,status,cache}` (top-line request counter —

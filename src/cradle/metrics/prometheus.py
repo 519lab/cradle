@@ -69,8 +69,8 @@ flight_followers = Counter(
 )
 flight_aborts = Counter(
     "cradle_flight_aborts_total",
-    "Single-flight flights failed for followers "
-    "(reason: leader_disconnect/upstream_error/timeout/stale)",
+    "Single-flight flights failed for followers (reason: leader_disconnect/"
+    "upstream_error/unexpected_tool_call/truncated_stream/timeout/stale)",
     ["reason"],
     registry=REGISTRY,
 )
