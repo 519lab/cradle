@@ -226,7 +226,14 @@ class L2Settings(BaseModel):
 class CompressSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     structure_min_chars: int = 400
-    min_tokens: int = 16
+    # Skip compression for a request when the fluff-stripping would save less than
+    # this fraction of the prompt's tokens (#52). Rule-based stripping removes ~0
+    # from terse turns (no pleasantry/filler) but adds cost — whitespace-collapsed
+    # content upstream + a reconstruction pass — so below the floor Cradle forwards
+    # the ORIGINAL messages untouched and skips reconstruction. Verbose prompts
+    # (the workload compression targets) clear this comfortably. 0.0 = compress on
+    # any positive saving; 1.0 = effectively disable compression.
+    min_savings_ratio: float = 0.02
 
 
 class ReconstructTenant(BaseModel):

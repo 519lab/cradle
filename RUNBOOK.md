@@ -244,7 +244,7 @@ only the configured tokens authenticate.
 | `X-Cradle-Upstream` | resolved backend name (`default` or a named upstream) |
 | `X-Cradle-Pipeline` | served entry's `pipeline_version` |
 | `X-Cradle-Inbound-Tokens` | prompt tokens the client sent, Cradle's own tokenizer |
-| `X-Cradle-Compressed-Tokens` | prompt tokens after rule-based compression, Cradle's own tokenizer. Present on a genuine miss (JSON **and** streaming); absent on hits and bypass. **True compression saving = `(inbound − compressed) / inbound`** — both from the same tokenizer |
+| `X-Cradle-Compressed-Tokens` | prompt tokens after rule-based compression, Cradle's own tokenizer. Present on a genuine miss (JSON **and** streaming); absent on hits and bypass. **True compression saving = `(inbound − compressed) / inbound`** — both from the same tokenizer. `compressed == inbound` means compression was a no-op or **gated** for this request (`compress.min_savings_ratio`, #52) |
 | `X-Cradle-Upstream-Tokens` | the **backend's own** `prompt_tokens` (a different tokenizer that also counts the backend chat template). Omitted on streaming misses. **Do not** compute compression savings as inbound − upstream: that mixes two tokenizers plus the chat template overhead and reads negative even when compression removed tokens (#52) |
 | `X-Cradle-Similarity` | L2 cosine of the served/examined candidate |
 | `X-Cradle-Guard` | `reject:<reason>` — an L2 candidate the precision guard/audit-floor rejected |
@@ -315,7 +315,7 @@ private registry — only `cradle_*` series appear.
 | Signal | Metric(s) | Read it as |
 |---|---|---|
 | **Hit rate** | `cradle_cache_hits_total{layer}` vs `cradle_cache_misses_total` | The product working. Split L1 (exact) vs L2 (semantic). |
-| **Token savings** | `(inbound − upstream) / inbound` from `cradle_inbound_prompt_tokens_total`, `cradle_upstream_prompt_tokens_total` | Compression payoff. |
+| **Overall token savings** | `(inbound − upstream) / inbound` from `cradle_inbound_prompt_tokens_total`, `cradle_upstream_prompt_tokens_total` | **Cache + compression combined, NOT compression alone.** An L1/L2 hit contributes `upstream=0` (line dominated by hit rate), and `inbound` (tiktoken) vs `upstream` (the backend's own tokenizer + chat template) mix two accountings (#52). For **compression** payoff per request, read `X-Cradle-Compressed-Tokens` vs `X-Cradle-Inbound-Tokens` (same tokenizer); `compressed == inbound` means compression was gated or a no-op for that request. |
 | **Upstream health** | `cradle_upstream_errors_total{status}` | Climbing 429/5xx = upstream trouble, surfaced through Cradle. |
 | **Latency** | `cradle_latency_seconds{stage}` — stages `l1`, `l2`, `embed`, `compress`, `upstream`, `reconstruct` | `l1` p99 should be ~ms; `embed`+`l2` the semantic cost; `upstream` dominates on misses. |
 | **Readiness** | `cradle_ready{component}` — `l1`/`l2`/`embedder`/`reranker` (1/0) | `reranker=0` = #5 protection off (also 503s `/readyz`). |

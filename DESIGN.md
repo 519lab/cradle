@@ -52,7 +52,7 @@ The PRD asks for a thin, CPU/edge-deployable middleware: SHA-256 L1, local-vecto
 | G1 | OpenAI-compatible `POST /v1/chat/completions` (stream and non-stream) and `GET /v1/models`. Unknown generation-affecting fields are **forwarded**, not dropped. |
 | G2 | L1 exact match: SHA-256 of the canonical hash input (closed allowlist below), **p99 < 2 ms** for production `l1.get` (disk read + JSON decode + `CacheRecord.model_validate`). Excludes HTTP and canonicalize. |
 | G3 | L2 semantic match: FastEmbed BGE-small 384-d + in-process Qdrant, cosine **≥ 0.90** default (config allowed **0.88–0.93** per PRD band; **never default or clamp below 0.85**), **p99 < 25 ms including embed** on warm model, 256–512 token prompts, **single in-flight embed**. Queue delay from a busy embed pool is **out of budget** (`stage="embed"` histogram). This budget covers the **cosine + embed** path; the precision guard + cross-encoder rerank added for #5 (Decisions 21–22) add latency on hits and meet 25 ms **only on the GPU rerank path**. |
-| G4 | On miss: rule-based **guards + fluff + whitespace** on `role=="user"` messages; **≥ 40% token savings** on the golden fixture suite under the **fixture policy** below. |
+| G4 | On miss: rule-based **guards + fluff + whitespace** on `role=="user"` messages, **gated by `compress.min_savings_ratio`** (default 0.02 — below-floor requests forwarded uncompressed, #52); **≥ 40% token savings** on the golden fixture suite under the **fixture policy** below (verbose rows clear the floor, so the gate does not lower the aggregate). |
 | G5 | Reconstruct as a **prefix/suffix envelope** (brand + format-instruction lines). No second LLM. **Partially satisfies PRD FR-3.1** (layout/brand merge only). |
 | G6 | Writeback original-prompt embedding + **reconstructed** response to L1 and L2. TTL **86400 s**. Invalidate on `system_prompt_version` or `pipeline_version` change. |
 | G7 | Tenant-scoped keys (`tenant_id` **and** `user_id`). Semantic hits cannot cross users. |
@@ -89,7 +89,7 @@ Locked. Not a menu.
 | 2 | L1 store | **`diskcache.Cache`** (SQLite+mmap, process-embedded). No Redis. No RocksDB. | Process-safe, native `expire=`, tags. Sub-ms raw GET on SSD; production `get` includes JSON+validate and must still meet <2 ms p99. Redis is a daemon; RocksDB (`rocksdict`) is a native dep with no win at this QPS. |
 | 3 | L2 store | **Qdrant local** `QdrantClient(path=...)`. Tests: `:memory:`. | Same API as server later. Payload filters for tenancy + sampling. Official local-mode warning at **20k points** — operational contract, not trivia. |
 | 4 | Embeddings | **FastEmbed `BAAI/bge-small-en-v1.5`**, 384-d, CPU ONNX, **no prefix**. | 67 MB, 10–20 ms CPU. Persistent `cache_dir`; library default is `/tmp/fastembed_cache`. |
-| 5 | Compression v1 | **Guards + fluff regex + whitespace on user messages only.** `structure.to_dense` behind `features.structure` default **off**. | Honest 40% on a documented verbose-prompt set. Dense-JSON rewrite without a reconstruct story would immortalize compressed answers. |
+| 5 | Compression v1 | **Guards + fluff regex + whitespace on user messages only**, gated by benefit: a request whose strip saves < `compress.min_savings_ratio` (default 0.02) is forwarded **uncompressed** (#52), so terse turns pay no cost and G4's ≥40% still holds on the verbose fixture set (they clear the floor easily). `structure.to_dense` behind `features.structure` default **off**. | Honest 40% on a documented verbose-prompt set. Rule-based stripping removes ~0 from terse real traffic while adding a reconstruction pass, so it should not run there. Dense-JSON rewrite without a reconstruct story would immortalize compressed answers. |
 | 6 | Local 1B runtime | **`llama-cpp-python` in-process**, extra `cradle[local-1b]`, default **off**. | No Ollama. Extra not in default `uv sync`. |
 | 7 | Wire protocol | **OpenAI Chat Completions** `POST /v1/chat/completions` + SSE `text/event-stream` + `GET /v1/models`. | De-facto client contract. `ChatRequest extra="allow"`. |
 | 8 | Auth | **Intercept by default.** Empty `auth.keys`: accept any/no Bearer, **forward `Authorization` upstream**, isolate L1/L2 by SHA-256 of that token (or `anon`). Optional `auth.keys` is an allowlist. | Drop-in in front of an existing OpenAI-compatible provider. No Cradle-issued key. |
@@ -1124,7 +1124,7 @@ l2:
 
 compress:
   structure_min_chars: 400
-  min_tokens: 16
+  min_savings_ratio: 0.02
 
 reconstruct:
   mode: wrap

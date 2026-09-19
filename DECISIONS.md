@@ -297,3 +297,54 @@ and does not inspect tool semantics, so a stateful tool with no time-word can se
 cached text answer under the flag. `sse.py` gained a `cache_disabled` accumulator flag; the wrap
 path ignores it (it has its own tool_call abort). No new `pipeline_version` bump — this only adds
 newly-cacheable entries; it does not change how existing entries are keyed or read.
+
+---
+
+## ADR-0007: Compression is gated by expected benefit, not run unconditionally
+
+**Date:** 2026-09-19
+**Status:** Accepted
+**Phase:** Efficiency
+**Deciders:** Greg
+
+### Context
+
+The PRD (line 15) promises "token compression on cache misses" as a core value proposition,
+and DESIGN goal G4 pins **≥40% token savings** on a documented golden fixture of *verbose*
+prompts. But live measurement (#52) showed rule-based fluff-stripping removes **~0 tokens** from
+real Open-WebUI traffic, whose user turns are terse and carry no leading/trailing pleasantry or
+filler word for the rules to strip. On that traffic the stage does nothing useful while still
+mutating the payload (whitespace-collapsed content) and running a reconstruction pass — pure cost.
+
+The naive fix (default `features.compression` off) conflicts with the PRD goal and silently
+retires the feature for users whose traffic *is* verbose, where it still hits its ≥40% target.
+
+### Decision
+
+Compression is **gated by expected benefit** rather than defaulted off. `compress()` computes the
+achievable saving under one tokenizer and, when it is below `compress.min_savings_ratio`
+(default **0.02**), forwards the **original** messages untouched with a bare reconstruction
+template — a per-request no-op. Terse turns auto-skip; verbose turns (which clear the floor
+easily) are compressed as before, so G4's aggregate is unchanged (measured mean 0.4979). The dead
+`compress.min_tokens` knob (declared since v1, never read) is removed in the same change; it was
+the vestigial, unwired version of this gate.
+
+The `over_compression_blocks` metric is incremented only when a compression is actually used, so
+a gated (discarded) rewrite no longer inflates the counter.
+
+### Rationale
+
+Gate-by-benefit honors **both** constraints: the PRD/G4 promise survives for the workload it was
+written for, and the dominant real workload stops paying for an inert stage. It needs no default
+change and is self-tuning — no operator has to know to flip a flag. `min_savings_ratio: 0.0`
+restores "compress on any positive saving"; a high value effectively disables compression.
+
+### Consequences
+
+`compress.min_savings_ratio` is a new config key (default 0.02). `compress.min_tokens` is gone;
+`compress` uses `extra="forbid"`, so a `cradle.yaml` that still lists `min_tokens` now fails to
+load — remove the line (RUNBOOK §1.3 covers the unknown-key startup failure). No `pipeline_version`
+bump: the cache key hashes the canonical (uncompressed) text, not the compressed payload, so gating
+a request does not change what it caches or reads. This ADR does not settle whether rule-based
+compression should eventually be replaced by a real neural compressor for long prompts — that
+remains future work.
