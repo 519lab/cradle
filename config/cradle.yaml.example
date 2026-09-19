@@ -114,7 +114,7 @@ l2:
 
 compress:
   structure_min_chars: 400
-  min_tokens: 16
+  min_savings_ratio: 0.02   # skip compression when fluff-stripping saves < this fraction (#52)
 
 reconstruct:
   mode: wrap
