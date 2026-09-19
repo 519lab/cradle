@@ -348,3 +348,76 @@ bump: the cache key hashes the canonical (uncompressed) text, not the compressed
 a request does not change what it caches or reads. This ADR does not settle whether rule-based
 compression should eventually be replaced by a real neural compressor for long prompts — that
 remains future work.
+
+---
+
+## ADR-0008: Streaming single-flight — coalesce concurrent identical cacheable misses
+
+**Date:** 2026-09-19
+**Status:** Accepted (v1 default OFF)
+**Phase:** Performance / cost
+**Deciders:** Greg
+
+### Context
+
+A burst of identical cacheable prompts arriving before the first writeback (eval loops, a bot
+under load, shared-key clients) pays upstream N times and writes back N times. `hash_input`
+excludes `stream`, so JSON and streaming callers already share an L1 cache key. The industry ships
+non-streaming single-flight only; Cradle's local-frame wrap contract (every wrap-path frame is
+synthesized locally with a local `id`/`created`) makes the streaming case natural.
+
+### Decision
+
+An in-flight registry `Runtime.flights: dict[str, Flight]` keyed on the **L1 key plus stream-ness**.
+The first cacheable, non-bypass, non-#43-passthrough, non-`no-cache`, non-`no-store`, non-probe miss
+is the leader; identical concurrent arrivals are followers that replay the leader's buffered frames
+then live-tail (stream) or await its completion dict (JSON). Only the leader calls upstream and only
+the leader writes back. Followers are marked `X-Cradle-Flight: follower`, count as misses, and carry
+`upstream_prompt_tokens = 0`. Coordination is `dict.setdefault` + `asyncio.Event` on the single event
+loop — no locks, no threads. The follow-check sits **before** embed/L2 (a follower skips the whole L2
+query — `embed_pool` is a single worker, so N followers would serialise on it; a fresh leader answer
+beats an L2 near-match). The leader registers **after** the probe return, so a probe never registers a
+flight it would not resolve.
+
+The flight key includes stream-ness because a **JSON leader publishes no frames** (only a completion
+dict), so a stream follower behind a JSON leader would replay nothing. **Cross-mode coalescing is a v1
+non-goal**; the bursts that motivate the feature are homogeneous. Tenant/principal safety is structural:
+`hash_input` includes `tenant_id` and `user_id`, so a flight key can never cross tenants or principals.
+In default intercept mode the principal derives from the client `Authorization`, so a shared-key burst
+coalesces but a distinct-key burst does not (documented, not a bug).
+
+### Leader disconnect (v1)
+
+Leader abort (client disconnect → Starlette throws `GeneratorExit`/`CancelledError` into the response
+generator) → followers receive an SSE error frame and `[DONE]`; the flight is failed and removed. The
+alternative (leader keeps consuming upstream for followers) needs a detached background task that breaks
+the `client_connected` writeback gate and the disconnect accounting — deferred. Tradeoff: followers lose
+work the leader already paid for; acceptable because it is rare and a follower can retry and become the
+new leader, and correctness (no hung requests, no wrong bytes) beats efficiency here.
+
+### Registry safety (the highest-risk surface)
+
+A leaked flight hangs every later identical prompt forever. Three layers, in order: (1) **resolve-or-fail
+in the leader's generator `finally`**, keyed on a single `completion_out` local that only a clean success
+sets — every early return / exception fails the flight, so a new exit path added later is safe by default;
+(2) **followers await with `upstream.timeout_s + slack`** so any leak degrades to a per-request 504 /
+error frame, not an infinite hang; (3) a **stale flight** (older than `upstream.timeout_s`) is replaced,
+not joined. The stream leader resolves the flight **before** `resp.aclose()` so a failure there can never
+strand followers.
+
+### Default OFF
+
+`cache.singleflight` defaults **false**. The failure mode of a leaked flight is uniquely bad (a hung
+request), unlike the other default-on hot-path flags. Flip to default-on after a LAN soak against the
+test container shows zero stuck flights and `cradle_flight_followers_total > 0` under a concurrent-identical
+burst.
+
+### Consequences
+
+One upstream call and one writeback per burst; followers count as misses with `upstream_prompt_tokens = 0`
+(so `cradle_upstream_prompt_tokens_total` does not over-count). New config key `cache.singleflight`, new
+response header `X-Cradle-Flight: follower`, new metrics `cradle_flight_followers_total` /
+`cradle_flight_aborts_total{reason}`. New module `gateway/flight.py`. No `pipeline_version` bump — a follower
+serves the leader's answer under the shared key, changing neither what caches nor how entries are read. The
+#43 tool-stream tee and bypass are structurally excluded (each client needs the raw upstream bytes /
+per-response headers); coalescing them is mechanically possible later but has no cache benefit.

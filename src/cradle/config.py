@@ -121,6 +121,12 @@ class CacheSettings(BaseModel):
     # semantics, so a stateful tool with no time-word ("what's my balance") can
     # serve a stale cached answer under this flag; set false to disable.
     cache_tool_streams: bool = True
+    # Coalesce concurrent identical cacheable misses onto ONE upstream call (#57,
+    # ADR-0008): the first arrival is the leader, later identical arrivals are
+    # followers that replay the leader's frames / await its completion. Default
+    # OFF in v1 — the failure mode of a leaked flight is a hung request, so it is
+    # opt-in until a soak shows zero stuck flights and followers > 0 under a burst.
+    singleflight: bool = False
 
     @field_validator("volatile_ttl_s")
     @classmethod
