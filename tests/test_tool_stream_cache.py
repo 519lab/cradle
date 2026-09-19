@@ -107,6 +107,30 @@ def test_plain_content_with_tools_is_cached(make_client, auth_header):
     assert b"ACK" in r2.content
 
 
+def test_tool_stream_miss_records_upstream_prompt_tokens(make_client, auth_header):
+    """Regression (#59): a tool-enabled streaming MISS must add its real upstream
+    prompt tokens to cradle_upstream_prompt_tokens_total. The bug: _observe ran
+    before _maybe_cache_passthrough set ctx.upstream_prompt_tokens, so every
+    tool-stream added 0 — zeroing the counter for all tool-bearing traffic. Ask
+    for usage explicitly so the fake upstream emits a real prompt_tokens (10)."""
+    from cradle.metrics import prometheus as m
+
+    def _total() -> float:
+        return m.upstream_prompt_tokens._value.get()
+
+    c = make_client()
+    before = _total()
+    r = _stream(
+        c, auth_header, "tools-plain-stream", "count my tokens",
+        stream_options={"include_usage": True},
+    )
+    assert r.headers["X-Cradle-Cache"] == "MISS"  # plain-content tool stream, fresh key
+    after = _total()
+    # The fake upstream reports prompt_tokens=10 for this stream. Pre-fix this delta
+    # was 0; the point of the test is that it is now the real, non-zero count.
+    assert after - before == 10, f"expected +10 upstream prompt tokens, got +{after - before}"
+
+
 def test_different_tool_set_does_not_hit(make_client, auth_header):
     c = make_client()
     _stream(c, auth_header, "tools-plain-stream", "answer in text")  # cache with TOOLS
@@ -356,3 +380,4 @@ async def test_maybe_cache_passthrough_gates(tmp_path, api_key, monkeypatch):
     ):
         await st._maybe_cache_passthrough(_RT(), req, _ctx(), None, compressed, a)
     assert writes == []
+

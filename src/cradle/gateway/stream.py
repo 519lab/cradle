@@ -170,7 +170,12 @@ async def _passthrough_cache_stream(
                     parse_and_accumulate(line, acc)
                 except Exception:  # noqa: BLE001 - aux parsing must never kill the stream
                     acc.cache_disabled = True
-        # Stream ended. Consider caching iff everything is clean.
+        # Stream ended. Record the real upstream prompt-token count BEFORE _observe
+        # so the cradle_upstream_prompt_tokens_total counter sees it — the tool-call
+        # accumulation finishes here, not before (#59). _observe on a tool-stream
+        # otherwise counts 0, which zeroes the metric for all tool-bearing traffic.
+        usage = acc.usage or {}
+        ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
         _observe(ctx)
         await _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc)
     except asyncio.CancelledError:
@@ -192,7 +197,8 @@ async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: Stre
     # so a cross-mode hit must return an identical body.
     body = wrap_content(compressed.template, acc.content)
     usage = acc.usage or {}
-    ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
+    # ctx.upstream_prompt_tokens was set by the caller (_passthrough_cache_stream)
+    # before _observe, from this same acc.usage; the cache record below reads it (#59).
     message: dict[str, Any] = {"role": "assistant", "content": body}
     # Store reasoning RAW (not through wrap_content — brand prefix/suffix are for the
     # answer only) under the key the upstream used, so a cache HIT replays the
