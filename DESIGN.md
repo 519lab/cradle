@@ -142,7 +142,7 @@ flowchart TB
 
 ### 2. Request pipeline (sequence of functions, not a ProxyService)
 
-`cradle/gateway/pipeline.py` is a **short sequencer** (<250 lines). Each step lives in its own module.
+`cradle/gateway/pipeline.py` is a **sequencer** — `handle_chat`, the L1/L2/miss dispatch, `_replay`, and the JSON miss path — not a god module. Each step lives in its own module: the streaming miss paths (bypass tee, #43 passthrough-cache, wrap) are in `cradle/gateway/stream.py`, and the response/observability leaf helpers (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`, `_client_auth`) — shared by the JSON and streaming paths — are in `cradle/gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Every module stays ≤ 600 lines.
 
 Non-stream miss: compress → upstream JSON → wrap merge → writeback → respond.
 
@@ -367,7 +367,9 @@ cradle/
     gateway/
       __init__.py
       routes.py
-      pipeline.py
+      pipeline.py                   # sequencer: handle_chat, L1/L2/miss dispatch, _replay, JSON miss
+      stream.py                     # streaming miss paths: bypass tee, #43 passthrough-cache, wrap
+      responses.py                  # response/observe leaf helpers (shared by JSON + stream)
       context.py                    # RequestContext, Principal
       sse.py
       writeback.py
