@@ -62,6 +62,18 @@ volatile_prompts = Counter(
     ["reason"],
     registry=REGISTRY,
 )
+flight_followers = Counter(
+    "cradle_flight_followers_total",
+    "Requests coalesced onto an in-flight leader upstream call (single-flight)",
+    registry=REGISTRY,
+)
+flight_aborts = Counter(
+    "cradle_flight_aborts_total",
+    "Single-flight flights failed for followers (reason: leader_disconnect/"
+    "upstream_error/unexpected_tool_call/truncated_stream/timeout/stale)",
+    ["reason"],
+    registry=REGISTRY,
+)
 l2_audits = Counter(
     "cradle_l2_audit_total",
     "Verified-L2 audits of served semantic hits, by verdict (agree/disagree/error)",

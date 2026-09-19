@@ -65,3 +65,8 @@ class RequestContext:
     # cached only if no tool call occurred. layer_hit stays "miss"; this flag is
     # the orthogonal wire strategy that routes to _passthrough_cache_stream.
     cacheable_passthrough_stream: bool = False
+    # Single-flight (#57): when this request is the leader of a flight, the pipeline
+    # attaches the Flight here so the miss path (_wrap_stream / _miss_json) can
+    # publish its outbound frames / final completion to waiting followers and
+    # resolve-or-fail the flight in a finally. None for a non-leader request.
+    flight: Any = None

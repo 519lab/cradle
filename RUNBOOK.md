@@ -251,6 +251,7 @@ only the configured tokens authenticate.
 | `X-Cradle-Rerank` | `pass:<score>` / `reject:<score>` / `fail-open` / `off` |
 | `X-Cradle-Volatile` | the volatility guard fired; value = reason |
 | `X-Cradle-Audit` | `scheduled` — a verified-L2 audit was queued for this hit |
+| `X-Cradle-Flight` | `follower` — this request was coalesced onto an in-flight leader's upstream call (single-flight, #57). Present only when `cache.singleflight` is on; the request is a MISS that made no upstream call. |
 | `X-Request-ID` | Cradle's own request id (upstream's is relayed as `x-cradle-upstream-request-id`) |
 
 ---
@@ -332,6 +333,8 @@ private registry — only `cradle_*` series appear.
 | `cradle_l2_audit_total{verdict}` | If `l2.audit_rate>0`: **measured false-hit rate** on real traffic. Watch `disagree`; it is the real wrong-hit signal. `error` = the audit's own upstream call failed. |
 | `cradle_l2_audit_answer_score{judge}` | Distribution of judge scores; calibration input for thresholds. |
 | `cradle_volatile_prompts_total{reason}` | How often the volatility guard applied a short TTL. |
+| `cradle_flight_followers_total` | If `cache.singleflight` on: requests coalesced onto a leader's upstream call — each is an upstream call (and writeback) **saved**. Zero under load means bursts are not identical/homogeneous, or the flag is off. |
+| `cradle_flight_aborts_total{reason}` | Single-flight leaders that failed their followers, by cause: `upstream_error` (backend errored mid-stream), `truncated_stream`, `unexpected_tool_call`, `leader_disconnect` (leader's client vanished), `timeout` (follower gave up on a stuck leader), `stale` (a leaked flight was replaced). `upstream_error`/`truncated_stream`/`leader_disconnect` are expected at low rates; climbing `timeout` or `stale` means leaders are hanging — investigate before flipping `singleflight` to default-on. |
 | `cradle_embed_errors_total` | Embedder failures/timeouts → those requests fell through to a real miss. |
 
 Also emitted: `cradle_requests_total{endpoint,status,cache}` (top-line request counter —
@@ -438,6 +441,7 @@ never writes and never calls upstream.
 | `cache.ttl_s` | `86400` | Default TTL and the clamp ceiling for `X-Cradle-Cache-TTL`. Lower to age entries out faster (also relieves the 20k ceiling). |
 | `cache.volatile_ttl_s` | `300` (`0`=never) | TTL for prompts the volatility guard flags time-sensitive. |
 | `cache.cache_tool_streams` | `true` | Cache tool-enabled streaming requests (#43): tee the response verbatim to the client, cache only a no-tool-call answer. `false` = `stream+tools` bypasses (pre-#43 behavior). NOTE: volatility is a user-text regex and does not inspect tool semantics — a stateful tool with no time-word can serve a stale cached answer under this flag. |
+| `cache.singleflight` | `false` | Coalesce concurrent identical cacheable misses onto ONE upstream call (#57, ADR-0008): the first is the leader, later identical arrivals are followers marked `X-Cradle-Flight: follower`. **Default OFF** — a leaked flight would hang a request; opt in only after a soak shows `cradle_flight_aborts_total{reason="timeout"\|"stale"}` flat and `cradle_flight_followers_total > 0` under a concurrent-identical burst. In intercept mode a burst only coalesces if the clients share an API key (the principal is derived from `Authorization`). |
 | `l2.audit_rate` | `0.0` (off) | Fraction of L2 hits re-verified upstream in the background. **Sensible range 0.01–0.05** — it spends real upstream calls. The way to *measure* your false-hit rate. |
 | `l2.audit_judge` | `auto` | `auto`=reranker when loaded, else embed cosine. |
 | `cache.max_temperature` | `1.0` | Requests above this aren't cached. |

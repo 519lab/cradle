@@ -16,6 +16,7 @@ from cradle.cache.volatility import volatile_reason_for
 from cradle.compress.engine import compress
 from cradle.gateway.audit import schedule_audit, should_audit
 from cradle.gateway.context import RequestContext
+from cradle.gateway.flight import Flight, flight_eligible, flight_key, follow, is_stale
 from cradle.gateway.models import ChatMessage, ChatRequest
 from cradle.gateway.probe import candidate_entry, probe_response
 from cradle.gateway.responses import (
@@ -167,6 +168,16 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
                 return _probe(ctx, l1_key=key, l2_eligible=False)
             return _replay(runtime, req, ctx, rec)
 
+    # Single-flight follow-check (#57), before embed/L2: if an identical request is
+    # already in flight, join it as a follower and skip embed + the whole L2 query
+    # (embed_pool is a single worker — N followers would serialise on it). A fresh
+    # leader answer beats an L2 near-match, so skipping L2 costs nothing.
+    if runtime.settings.cache.singleflight and flight_eligible(ctx):
+        fkey = flight_key(key, req.stream)
+        existing = runtime.flights.get(fkey)
+        if existing is not None and not is_stale(existing, runtime.settings.upstream.timeout_s):
+            return await follow(runtime, req, ctx, existing)
+
     vec: list[float] | None = None
     eligible = l2_eligible(canonical, req, runtime.settings) and runtime.qdrant is not None
     if eligible:
@@ -261,6 +272,21 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
     ctx.layer_hit = "miss"
     if ctx.cache_probe:
         return _probe(ctx, l1_key=key, l2_eligible=eligible)
+    # Single-flight register (#57), after the probe return so a probe never registers
+    # a flight it won't resolve. A leader reaching here is committed to calling
+    # upstream (all hit/replay paths returned above). setdefault is atomic on the one
+    # event loop with no intervening await — that is the concurrency control: if
+    # another request registered first this tick, become a late follower instead.
+    if runtime.settings.cache.singleflight and flight_eligible(ctx):
+        fkey = flight_key(key, req.stream)
+        mine = Flight(fkey)
+        existing = runtime.flights.setdefault(fkey, mine)
+        if existing is not mine and not is_stale(existing, runtime.settings.upstream.timeout_s):
+            return await follow(runtime, req, ctx, existing)
+        if existing is not mine:  # stale flight held the slot — replace it and lead
+            m.flight_aborts.labels(reason="stale").inc()
+            runtime.flights[fkey] = mine
+        ctx.flight = mine
     return await _miss(runtime, req, ctx, vec=vec)
 
 
@@ -339,37 +365,58 @@ async def _miss(
 
 
 async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSONResponse:
-    t0 = time.perf_counter()
+    # Single-flight leader (#57): a try/finally is correct here (work is awaited
+    # inline). Resolution is centralised in the finally on one local, out: it stays
+    # None on the upstream-error return, so that path fail()s the flight; only a
+    # clean success sets it and finish()es. The finally always removes the flight so
+    # a later identical prompt L1-hits (or leads afresh) instead of hanging. A JSON
+    # flight publishes no frames — only the completion dict — and only JSON callers
+    # ever join it (the flight key is stream-scoped).
+    out: dict | None = None
     try:
-        completion = await chat(
-            runtime.http, target, payload, authorization=_client_auth(ctx)
-        )
-    except UpstreamError as exc:
-        return _upstream_error_response(runtime, ctx, exc)
-    ctx.t_upstream_s = time.perf_counter() - t0
-    usage = completion.get("usage") or {}
-    ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
-    t1 = time.perf_counter()
-    if ctx.layer_hit == "bypass":
-        out = completion
-    else:
-        out = merge(completion, compressed.template)
-    ctx.t_reconstruct_s = time.perf_counter() - t1
-    ttl = _effective_ttl(runtime, ctx)
-    skip = cache_skip_reason(out)
-    if ctx.cache_no_store or ttl == 0:
-        skip = skip or "no_store"
-    if ctx.layer_hit != "bypass" and ctx.canonical is not None and skip is None:
-        rec = record_from(
-            ctx.canonical,
-            out,
-            ctx.inbound_prompt_tokens,
-            ctx.upstream_prompt_tokens,
-            ttl,
-        )
-        await writeback(runtime, ctx.canonical, vec, rec)
-    elif skip is not None:
-        m.cache_write_skips.labels(reason=skip).inc()
-    _observe(ctx)
-    log_request(runtime.settings, ctx, out)
-    return JSONResponse(out, headers=_headers(ctx))
+        t0 = time.perf_counter()
+        try:
+            completion = await chat(
+                runtime.http, target, payload, authorization=_client_auth(ctx)
+            )
+        except UpstreamError as exc:
+            return _upstream_error_response(runtime, ctx, exc)
+        ctx.t_upstream_s = time.perf_counter() - t0
+        usage = completion.get("usage") or {}
+        ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
+        t1 = time.perf_counter()
+        if ctx.layer_hit == "bypass":
+            merged = completion
+        else:
+            merged = merge(completion, compressed.template)
+        ctx.t_reconstruct_s = time.perf_counter() - t1
+        ttl = _effective_ttl(runtime, ctx)
+        skip = cache_skip_reason(merged)
+        if ctx.cache_no_store or ttl == 0:
+            skip = skip or "no_store"
+        if ctx.layer_hit != "bypass" and ctx.canonical is not None and skip is None:
+            rec = record_from(
+                ctx.canonical,
+                merged,
+                ctx.inbound_prompt_tokens,
+                ctx.upstream_prompt_tokens,
+                ttl,
+            )
+            await writeback(runtime, ctx.canonical, vec, rec)
+        elif skip is not None:
+            m.cache_write_skips.labels(reason=skip).inc()
+        _observe(ctx)
+        log_request(runtime.settings, ctx, merged)
+        out = merged  # marks a clean success for the finally
+        return JSONResponse(merged, headers=_headers(ctx))
+    finally:
+        if ctx.flight is not None:
+            if out is not None:
+                ctx.flight.finish(out)
+            else:
+                m.flight_aborts.labels(reason="upstream_error").inc()
+                ctx.flight.fail({
+                    "error": {"message": "single-flight leader failed upstream",
+                              "type": "server_error", "code": "upstream_error"}
+                })
+            runtime.flights.pop(ctx.flight.key, None)

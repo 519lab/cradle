@@ -70,6 +70,7 @@ cache:
   # tool semantics, so a stateful tool with no time-word ("what's my balance") can
   # serve a stale cached answer under this flag; set false to disable.
   cache_tool_streams: true
+  singleflight: false        # coalesce concurrent identical misses onto one upstream call (#57); default OFF
 
 l2:
   mode: local
