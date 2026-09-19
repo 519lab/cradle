@@ -125,7 +125,7 @@ These raise during the lifespan startup and the process exits — a crash-loop, 
 | `data_dir` not writable/executable | `PermissionError` re-raised | Fix perms (dir is created `0700`) |
 | Embedder dim mismatch | `RuntimeError: embed dim N != 384` | Wrong `l2.model`/`l2.dim` |
 | `features.local_1b` on without extra | `RuntimeError: features.local_1b requires extra cradle[local-1b]` | Install extra or turn the flag off |
-| Unknown key in `cradle.yaml` (e.g. a config field removed in an upgrade) | `ValidationError: Extra inputs are not permitted` | Remove the stale key — every config model is `extra="forbid"`, so an unrecognized key is fatal, not ignored |
+| Unknown key in `cradle.yaml` **or** a `CRADLE_*` env var (e.g. a config field removed in an upgrade) | `cradle: unusable configuration: N unknown setting(s)…` then a per-key line and exit code **2** (no traceback) (#61) | Every config model is `extra="forbid"`, so an unrecognized key is fatal, not ignored. The message names each key and says whether it's in the config file (`remove or rename it in <path>`) or came from the environment (`check CRADLE_… in your environment or compose file`) — fix as directed and restart. A raw `uvicorn`/`gunicorn` launch (§3.1) still shows a `ValidationError` traceback, since it loads settings at import; use `python -m cradle` for the actionable message. |
 | `l2.rerank_device: cuda` on the **CPU** image | `RuntimeError: l2.rerank_device is 'cuda' but onnxruntime has no CUDAExecutionProvider…` | Build/run the **GPU image** (§1.4) or set `l2.rerank_device: cpu`. `cuda` is inert without the GPU image. |
 
 **Reranker warm-up failure does NOT crash startup.** It is caught, logged
@@ -484,9 +484,12 @@ curl -s -H 'X-Cradle-Cache-Control: probe' -H 'Content-Type: application/json' \
 ```
 
 A key the running code does not know (e.g. a value left over after an upgrade removed
-it, like #27's `cache.evict_old_pipeline`) makes config load fail on restart — Cradle
-uses `extra="forbid"` on its sub-configs. The container will not become ready and the
-log shows `Extra inputs are not permitted`; remove the offending line and restart. (An
+it, like #27's `cache.evict_old_pipeline` or #55's `compress.min_tokens`) makes config
+load fail on restart — Cradle uses `extra="forbid"` on its sub-configs. The container
+will not become ready; as of #61 the log shows one actionable message per stale key —
+`cradle: unusable configuration: … <key>: remove or rename it in <path>` (or `check
+CRADLE_<KEY>` when the key came from the environment, not the file) and the process
+exits 2 rather than printing a repeating traceback. Fix each named key and restart. (An
 edit to `docker-compose.yml` itself — including the `volumes:` mount — still needs
 `docker compose up -d`, not just `restart`; only the mounted config file is re-read on a
 bare restart.)

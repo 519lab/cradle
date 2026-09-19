@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 
@@ -369,5 +369,101 @@ class Settings(BaseSettings):
         return (env_settings, init_settings, yaml_source)
 
 
+class ConfigError(ValueError):
+    """A configuration is unusable in a way an operator can act on directly.
+
+    Raised in place of a raw pydantic ``ValidationError`` when the only problem is
+    unknown/removed keys (``extra="forbid"``), so a stale ``cradle.yaml`` after an
+    upgrade yields one actionable line naming the keys and where they came from,
+    not a repeating traceback wall (#61). Other validation failures re-raise as
+    ``ValidationError`` unchanged.
+    """
+
+
+def _yaml_top_keys() -> set[str] | None:
+    """Best-effort dotted-key set of the on-disk config, for locating a bad key.
+
+    Returns None (not a crash) if the file is absent/unreadable/malformed — the
+    caller then falls back to ambiguous phrasing. This helper must never raise: it
+    runs inside an error handler whose whole job is to not become the failure."""
+    try:
+        path = _config_path()
+        if not path.is_file():
+            return None
+        with path.open(encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    keys: set[str] = set()
+
+    def _walk(prefix: str, node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            dotted = f"{prefix}{k}"
+            keys.add(dotted)
+            _walk(f"{dotted}.", v)
+
+    _walk("", data)
+    return keys
+
+
+def _config_error_message(exc: ValidationError) -> str | None:
+    """Turn extra_forbidden errors into an operator-actionable message, or None.
+
+    None means the error set has no extra_forbidden entries (a stale-key problem),
+    so the caller re-raises the original ValidationError untouched. When there ARE
+    stale keys, any OTHER validation errors are appended verbatim so a real failure
+    is never hidden behind the friendly text."""
+    errors = exc.errors()
+    extra = [e for e in errors if e.get("type") == "extra_forbidden"]
+    if not extra:
+        return None
+    path = _config_path()
+    file_keys = _yaml_top_keys()  # None if the file couldn't be read
+    # Dedup on the loc tuple so a flat vs nested distinction survives (a dotted
+    # string loses the int-index information we need to phrase safely).
+    locs = sorted({tuple(e["loc"]) for e in extra}, key=lambda t: tuple(map(str, t)))
+    lines = [
+        f"unusable configuration: {len(locs)} unknown setting"
+        f"{'s' if len(locs) != 1 else ''} "
+        "(a key removed or renamed in an upgrade — every config section is "
+        "extra=forbid, so an unrecognized key is fatal, not ignored):",
+    ]
+    for loc in locs:
+        key = ".".join(str(p) for p in loc)
+        # We can only make the confident "it's an env var, not in the file" claim
+        # for a FLAT (all-string) path we positively looked up and did not find. A
+        # loc with an int index (a list element, e.g. routes.0.foo) has no clean
+        # env-var spelling and no flat file key to match, so claiming "not in the
+        # file" would be the exact wrong instruction — stay ambiguous there.
+        flat = all(isinstance(p, str) for p in loc)
+        env_name = "CRADLE_" + "__".join(loc).upper() if flat else None
+        if flat and file_keys is not None and key in file_keys:
+            where = f"remove or rename it in {path}"
+        elif flat and file_keys is not None and key not in file_keys:
+            where = f"not in {path} — check {env_name} in your environment or compose file"
+        elif flat:  # file unreadable — could be either
+            where = f"remove or rename it in {path}, or check {env_name} in your environment"
+        else:  # nested/list path — no safe env spelling; point at both sources
+            where = f"remove or rename it in {path} or wherever it is set (e.g. a CRADLE_* env var)"
+        lines.append(f"  - {key}: {where}")
+    others = [e for e in errors if e.get("type") != "extra_forbidden"]
+    if others:
+        lines.append("additionally:")
+        for e in others:
+            loc = ".".join(str(p) for p in e["loc"])
+            lines.append(f"  - {loc}: {e.get('msg', 'invalid')}")
+    return "\n".join(lines)
+
+
 def load_settings(**overrides: Any) -> Settings:
-    return Settings(**overrides)
+    try:
+        return Settings(**overrides)
+    except ValidationError as exc:
+        message = _config_error_message(exc)
+        if message is None:
+            raise
+        raise ConfigError(message) from exc
