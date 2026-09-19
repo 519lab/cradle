@@ -206,3 +206,34 @@ def test_synthesized_stream_parses_back_to_the_stored_body(
     assert acc.saw_done is True
     assert (acc.usage is not None) == include_usage
     assert frames.endswith(b"data: [DONE]\n\n")
+
+
+@given(
+    body=st.text(min_size=1, max_size=120),
+    reasoning=st.text(min_size=1, max_size=120),
+    key=st.sampled_from(["reasoning_content", "reasoning"]),
+)
+def test_synthesized_stream_round_trips_reasoning(
+    body: str, reasoning: str, key: str, cfg: Settings
+) -> None:
+    # A stored reasoning field replays on its own frame and parses back to the
+    # accumulator's reasoning (#46/#49) without leaking into content.
+    canonical = canonicalize(
+        _req({"model": "m", "messages": [{"role": "user", "content": "q"}]}), _PRINCIPAL, cfg
+    )
+    completion = {
+        "id": "chatcmpl-r", "object": "chat.completion", "created": 1, "model": "m",
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": body, key: reasoning},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    record = record_from(canonical, completion, 1, 1, 60)
+    acc = StreamAccumulator(outbound_id="x", outbound_created=1, model="m")
+    frames = b"".join(synthesize_sse(record, include_usage=False))
+    for line in frames.decode().split("\n"):
+        parse_and_accumulate(line, acc)
+    assert acc.content == body           # content is intact and not polluted
+    assert acc.reasoning == reasoning    # reasoning survived the round trip
+    assert acc.reasoning_key == key      # under the original key
+    assert acc.cache_disabled is False   # reasoning does not disable caching
