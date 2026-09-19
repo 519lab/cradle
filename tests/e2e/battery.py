@@ -12,12 +12,19 @@ each on the path where it is meaningful:
                            header, verified against source), reported separately
                            via a labelled conformance block, never mixed into the
                            traffic-rate denominator.
-  3. Compression savings — inbound vs upstream prompt tokens, measured ONLY on
-                           non-stream fresh misses (``X-Cradle-Cache-Control:
-                           no-store``). Streaming responses strip
-                           ``X-Cradle-Upstream-Tokens`` (the count is unknown until
-                           the body has streamed), so per-request compression is
-                           not computable there.
+  3. Compression savings — inbound vs COMPRESSED prompt tokens
+                           (``X-Cradle-Inbound-Tokens`` /
+                           ``X-Cradle-Compressed-Tokens``), both from Cradle's own
+                           tokenizer, measured ONLY on non-stream fresh misses
+                           (``X-Cradle-Cache-Control: no-store, no-cache``).
+                           NOT inbound vs upstream: the backend's own token count
+                           uses a different tokenizer and includes its chat
+                           template, so subtracting it from Cradle's inbound reads
+                           as negative even though compression only removes tokens
+                           (the #52 mistake). The compressed header is present on
+                           streaming misses too, but this section measures the
+                           non-stream path (where upstream tokens are also reported
+                           for the reference figure).
 
 This is a *diagnostic driver*, not a pass/fail test — it is deliberately kept out
 of the pytest suite (no ``test_`` names, no assertions on absolute numbers). Point
@@ -145,12 +152,21 @@ def cache_outcome(h: dict) -> str:
     return h.get("x-cradle-cache", "?")
 
 
-def tokens(h: dict) -> tuple[int, int]:
-    """(inbound, upstream) prompt tokens. upstream is absent on streaming."""
+def tokens(h: dict) -> tuple[int, int, int]:
+    """(inbound, compressed, upstream) prompt tokens.
+
+    inbound and compressed are BOTH counted with Cradle's own tokenizer, so
+    inbound - compressed is the true compression saving under one accounting.
+    upstream is the backend's own count (a different tokenizer that also includes
+    the chat template) and is absent on streaming. compressed is present only on a
+    miss (compression does not run on hits/bypass); -1 = not reported.
+    """
     inb = int(h.get("x-cradle-inbound-tokens", 0) or 0)
+    comp_raw = h.get("x-cradle-compressed-tokens")
+    comp = int(comp_raw) if comp_raw not in (None, "") else -1  # -1 = compression didn't run
     up_raw = h.get("x-cradle-upstream-tokens")
     up = int(up_raw) if up_raw not in (None, "") else -1  # -1 = not reported (stream)
-    return inb, up
+    return inb, comp, up
 
 
 def task_body(model: str, tmpl: str, content: str) -> dict:
@@ -238,12 +254,13 @@ def run_traffic(c: Client) -> list[dict]:
     rows: list[dict] = []
 
     def record(scenario: str, expect_reason: str | None, h: dict, err) -> None:
-        inb, up = tokens(h)
+        inb, comp, up = tokens(h)
         rows.append(
             {
                 "scenario": scenario,
                 "cache": cache_outcome(h),
                 "inbound": inb,
+                "compressed": comp,  # -1 when compression did not run (hit/bypass)
                 "upstream": up,  # -1 when the header was stripped (streaming)
                 "bypass_reason": expect_reason,  # shape-inferred, not from a header
                 "error": err,
@@ -363,16 +380,25 @@ def run_conformance(c: Client, tool_stream_state: str) -> list[dict]:
 
 # ---------------------------------------------------------------------------
 # Compression measurement: non-stream fresh misses only, forced with no-store so
-# nothing is served from cache and upstream tokens are always reported.
+# nothing is served from cache.
+#
+# The compression saving is inbound vs COMPRESSED, both from Cradle's own
+# tokenizer (X-Cradle-Inbound-Tokens / X-Cradle-Compressed-Tokens) — a single,
+# consistent accounting. It is NOT inbound vs upstream: X-Cradle-Upstream-Tokens
+# is the backend's own count, which uses a different tokenizer AND includes the
+# backend's chat template (ChatML tags, BOS, etc.) — a per-request overhead whose
+# size varies with request shape and has nothing to do with compression.
+# Subtracting the two accountings reads as "negative savings" even when
+# compression removed real tokens — the mistake that #52 was originally filed on.
+# The upstream count is still recorded and reported separately as informational
+# baseline overhead.
 # ---------------------------------------------------------------------------
 def run_compression(c: Client) -> list[dict]:
     rows: list[dict] = []
     # no-store AND no-cache: no-store alone only prevents the WRITE — it does not
     # skip the cache READ, so a turn already cached by run_traffic() would return an
-    # L1 HIT with upstream_tokens=0 and read as a false "+100% savings". no-cache
-    # forces a fresh upstream call; a per-turn nonce guarantees no collision even
-    # on a warm cache. This is the only path where upstream tokens are reported
-    # (streaming strips the header), so it is the only place compression is real.
+    # L1 HIT (no compression header) and no datapoint. no-cache forces a fresh
+    # miss; a per-turn nonce guarantees no collision even on a warm cache.
     headers = {"X-Cradle-Cache-Control": "no-store, no-cache"}
     nonce = time.time_ns()
     for turn in CHAT_TURNS:
@@ -384,12 +410,13 @@ def run_compression(c: Client) -> list[dict]:
             ],
         }
         h, _, _, err = c.post(body, extra_headers=headers)
-        inb, up = tokens(h)
+        inb, comp, up = tokens(h)
         cache = cache_outcome(h)
-        # A real compression number requires a MISS (upstream actually called).
-        # Surface anything else rather than averaging a bogus 0 into the total.
+        # A real compression number requires a MISS (compression header present).
+        # Surface anything else rather than averaging a bogus datapoint into the total.
         rows.append(
-            {"turn": turn[:40], "inbound": inb, "upstream": up, "cache": cache, "error": err}
+            {"turn": turn[:40], "inbound": inb, "compressed": comp,
+             "upstream": up, "cache": cache, "error": err}
         )
     return rows
 
@@ -460,24 +487,40 @@ def report(pre: dict, traffic: list[dict], conf: list[dict], comp: list[dict]) -
         print(f"  {r['reason']:18s} expected={r['expected']:7s} got={r['got']:7s} [{mark}]")
 
     print("\n-- COMPRESSION (non-stream, no-store+no-cache fresh misses only) --")
-    ti = tu = 0
+    print("  savings = (inbound - compressed) / inbound, both Cradle's own tokenizer")
+    ti = tc = tu = 0
     skipped = 0
     for r in comp:
-        i, u, cache = r["inbound"], r["upstream"], r.get("cache", "?")
-        # Only a genuine MISS with a reported upstream count is a real datapoint.
-        # A HIT (upstream=0) or a stripped header (-1) would fake a +100% saving.
-        if cache != "MISS" or u < 0:
+        i, comp_t, u, cache = r["inbound"], r.get("compressed", -1), r["upstream"], r.get("cache", "?")
+        # A real datapoint needs a fresh MISS with the compressed header present.
+        # Name the actual cause: a non-MISS is not a fresh miss; a MISS with no
+        # compressed header means the instance predates X-Cradle-Compressed-Tokens.
+        if cache != "MISS":
             skipped += 1
-            print(f"  {r['turn']:42s} SKIPPED (cache={cache}, upstream={u}) — not a fresh miss")
+            print(f"  {r['turn']:42s} SKIPPED (cache={cache}) — not a fresh miss")
+            continue
+        if comp_t < 0:
+            skipped += 1
+            print(f"  {r['turn']:42s} SKIPPED — instance emits no X-Cradle-Compressed-Tokens "
+                  "(#52); upgrade Cradle to measure compression")
             continue
         ti += i
-        tu += u
-        sav = (i - u) / i * 100 if i else 0.0
-        print(f"  {r['turn']:42s} inbound={i:5d} upstream={u:5d} savings={sav:+5.1f}%")
+        tc += comp_t
+        if u >= 0:
+            tu += u
+        sav = (i - comp_t) / i * 100 if i else 0.0
+        print(f"  {r['turn']:42s} inbound={i:5d} compressed={comp_t:5d} savings={sav:+5.1f}%")
     if ti:
-        print(f"  {'TOTAL':42s} inbound={ti:5d} upstream={tu:5d} "
-              f"savings={(ti - tu) / ti * 100:+5.1f}%")
-        print("  (negative ⇒ compression ADDS tokens for this traffic; real savings come from caching)")
+        print(f"  {'TOTAL':42s} inbound={ti:5d} compressed={tc:5d} "
+              f"savings={(ti - tc) / ti * 100:+5.1f}%")
+        print("  (this is the TRUE compression saving; ~0% on terse traffic means "
+              "rule-based fluff-stripping had nothing to strip — see #52)")
+        if tu:
+            # Informational only: the backend's own count includes its chat
+            # template + a different tokenizer. This gap is NOT compression.
+            print(f"  {'(backend upstream count, for reference)':42s} "
+                  f"upstream={tu:5d} — includes the backend chat template + its own "
+                  f"tokenizer; not a compression figure")
     if skipped:
         print(f"  ({skipped} turn(s) skipped — no valid fresh-miss measurement)")
 
@@ -489,8 +532,13 @@ def report(pre: dict, traffic: list[dict], conf: list[dict], comp: list[dict]) -
         "errors": errors,
         "hypothesis_won": hyp_won,
         "conformance": conf,
-        "compression_total": {"inbound": ti, "upstream": tu, "valid_turns": len(comp) - skipped},
-        "compression_savings_pct": ((ti - tu) / ti * 100) if ti else None,
+        "compression_total": {
+            "inbound": ti,
+            "compressed": tc,
+            "upstream_reference": tu,
+            "valid_turns": len(comp) - skipped,
+        },
+        "compression_savings_pct": ((ti - tc) / ti * 100) if ti else None,
     }
 
 

@@ -28,7 +28,12 @@ streaming** was verified on 2026-09-18 against a live instance running a reasoni
 (`meta/muse-glimmer-30B` on llama.cpp), Cradle built from this branch: a plain stream
 now **forwards `reasoning_content` to the client** (330 reasoning frames on a live miss;
 previously stripped) and **caches + replays** it (MISS→HIT-L1, reasoning present in both);
-so reasoning no longer produces `unsupported_stream` write-skips (#46/#49).*
+so reasoning no longer produces `unsupported_stream` write-skips (#46/#49).
+**`X-Cradle-Compressed-Tokens`** (#52) was verified on 2026-09-19 by unit test on
+this branch (present on JSON and streaming misses, absent on hits and bypass), not
+against a live instance — the `192.168.50.30` container above runs pre-change code
+and emits no such header; a battery run against it correctly skips the compression
+turns rather than reporting a bogus number.*
 
 > **Keeping this current is not optional.** Any change touching a config key, an env
 > var, a metric name, a health/readiness condition, a capacity limit, or a per-request
@@ -238,7 +243,9 @@ only the configured tokens authenticate.
 | `X-Cradle-Cache` | `HIT-L1` / `HIT-L2` / `MISS` / `BYPASS` |
 | `X-Cradle-Upstream` | resolved backend name (`default` or a named upstream) |
 | `X-Cradle-Pipeline` | served entry's `pipeline_version` |
-| `X-Cradle-Inbound-Tokens` / `X-Cradle-Upstream-Tokens` | compression savings = inbound − upstream (upstream-tokens omitted on streaming misses) |
+| `X-Cradle-Inbound-Tokens` | prompt tokens the client sent, Cradle's own tokenizer |
+| `X-Cradle-Compressed-Tokens` | prompt tokens after rule-based compression, Cradle's own tokenizer. Present on a genuine miss (JSON **and** streaming); absent on hits and bypass. **True compression saving = `(inbound − compressed) / inbound`** — both from the same tokenizer |
+| `X-Cradle-Upstream-Tokens` | the **backend's own** `prompt_tokens` (a different tokenizer that also counts the backend chat template). Omitted on streaming misses. **Do not** compute compression savings as inbound − upstream: that mixes two tokenizers plus the chat template overhead and reads negative even when compression removed tokens (#52) |
 | `X-Cradle-Similarity` | L2 cosine of the served/examined candidate |
 | `X-Cradle-Guard` | `reject:<reason>` — an L2 candidate the precision guard/audit-floor rejected |
 | `X-Cradle-Rerank` | `pass:<score>` / `reject:<score>` / `fail-open` / `off` |
