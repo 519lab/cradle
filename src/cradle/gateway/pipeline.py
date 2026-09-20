@@ -297,9 +297,12 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
     if ctx.flight is None:
         return await _miss(runtime, req, ctx, vec=vec)
     # Leader raise-guard (#63): the leaf miss paths resolve the flight in their own
-    # finally, but an exception RAISED before that finally is reached (or a future
-    # early return in _miss_stream that forgets to resolve) would leak the flight and
-    # poison the key. Fail+release it here if it is still unresolved, then re-raise.
+    # finally, but an exception RAISED before that finally is reached would leak the
+    # flight and poison the key. Fail+release it here if still unresolved, then
+    # re-raise (BaseException so CancelledError is covered; the unconditional re-raise
+    # preserves cancellation). Scope note: this catches a *raise*, not an early
+    # `return` — a leaf path that returns without resolving is NOT covered here (that
+    # is why _miss_stream's own UpstreamError branch resolves the flight directly).
     # Idempotent with the leaf finally via the done.is_set() guard.
     try:
         return await _miss(runtime, req, ctx, vec=vec)
