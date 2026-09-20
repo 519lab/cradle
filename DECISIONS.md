@@ -420,8 +420,14 @@ key; **#64** — the registry pop is now identity-checked (`resolve_and_release(
 place that mutates `runtime.flights` on leader exit), so a replaced stale leader can no longer delete the
 live replacement; **#65** — `is_stale` now measures from `last_progress_at` (bumped on every `publish()`),
 not flight creation, so a healthy long or backpressured stream is never treated as leaked, and the stream
-follower's timeout is a progress deadline (`asyncio.timeout_at` + `reschedule`) rather than a
-total-duration bound. The soak gate stands regardless: the failure mode of a leaked flight is uniquely bad
+follower's timeout is a per-frame progress deadline (`asyncio.wait_for` around each `tail()` step, with the
+downstream `yield` outside it so a slow follower client cannot trip its own deadline) rather than a
+total-duration bound. Two lower-severity, self-healing gaps remain open and gated off the same soak:
+**#67** (an unstarted `_wrap_stream` generator leaks its flight on a client disconnect during
+`response.start` — bounded and evicted by staleness, not closeable from the request path) and **#68** (four
+HIGH/MEDIUM response-correctness gaps from the same review: post-finish writeback failure, the
+follow-check/register burst race, a double-wrapped follower error frame, and JSON followers losing the
+leader's upstream status). The soak gate stands regardless: the failure mode of a leaked flight is uniquely bad
 (a hung request), so default-on waits on the soak evidence above even now that these bugs are closed.
 
 ### Consequences
