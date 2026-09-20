@@ -276,6 +276,97 @@ async def test_leader_generator_abort_fails_flight_and_clears_registry(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_reaper_clears_an_unstarted_leaked_generator(tmp_path, api_key):
+    """#67: an UNSTARTED _wrap_stream generator (Starlette cancels the response before
+    it ever pulls a frame) never runs its finally, so the registered flight leaks —
+    `done` unset, slot retained. The background reaper must resolve+evict it once it
+    goes stale. Deliberately NEVER starts the generator (no __anext__), which is the
+    exact path the disconnect-mid-stream test above does not cover."""
+    import cradle.gateway.stream as st
+    from cradle.cache.records import Principal
+    from cradle.compress.engine import compress
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight, reap_stale_flights
+    from cradle.gateway.models import ChatMessage, ChatRequest
+    from cradle.gateway.sse import StreamAccumulator
+
+    s = _settings(tmp_path, api_key)
+    principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+    req = ChatRequest(model="m", stream=True, messages=[ChatMessage(role="user", content="leak")])
+    compressed = compress(req.messages, s, "m")
+    flight = Flight("k:s")
+
+    class _RT:
+        settings = s
+        flights = {"k:s": flight}
+
+    rt = _RT()
+
+    class _Resp:
+        async def aiter_lines(self):
+            yield ""  # never reached — the generator is never started
+
+        async def aclose(self):
+            pass
+
+    ctx = RequestContext(request_id="r", principal=principal)
+    ctx.layer_hit = "miss"
+    ctx.flight = flight
+
+    # Construct the generator but NEVER iterate it: its finally will never run.
+    gen = st._wrap_stream(rt, req, ctx, None, compressed, _Resp(),
+                          StreamAccumulator(outbound_id="o", outbound_created=1, model="m"))
+
+    timeout_s = s.upstream.timeout_s
+    # A fresh flight is not yet stale: the reaper must leave it alone.
+    assert reap_stale_flights(rt, timeout_s) == 0
+    assert rt.flights == {"k:s": flight}
+    assert not flight.done.is_set()
+
+    # Age it past the staleness bound (the leaked generator never publishes, so in
+    # production last_progress_at simply never advances; here we backdate it).
+    flight.last_progress_at -= timeout_s + 1
+    reaped = reap_stale_flights(rt, timeout_s)
+
+    assert reaped == 1
+    assert flight.done.is_set(), "reaper must resolve the leaked flight so followers wake"
+    assert flight.error is not None, "reaped flight fails (not finishes) so followers get an error"
+    assert rt.flights == {}, "reaper must evict the leaked slot so the key is no longer poisoned"
+
+    await gen.aclose()  # tidy the never-started generator
+
+
+@pytest.mark.asyncio
+async def test_reaper_loop_runs_under_lifespan_and_evicts_a_leak(tmp_path, api_key):
+    """#67: the reaper background task wired into the lifespan actually evicts a leaked
+    flight (covers the loop glue, not just reap_stale_flights). Uses a tiny
+    upstream.timeout_s so the sweep fires fast, and polls with a deadline (the
+    codebase's non-flaky pattern) rather than asserting on a fixed sleep."""
+    from cradle.config import UpstreamSettings
+    from cradle.gateway.flight import Flight
+
+    s = _settings(tmp_path, api_key)
+    # Rebuild with a tiny staleness/sweep interval so the reaper fires promptly.
+    s = s.model_copy(update={
+        "upstream": UpstreamSettings(base_url="http://upstream/v1", models_passthrough=False, timeout_s=0.05),
+    })
+    http = httpx.AsyncClient(transport=httpx.MockTransport(GatedUpstream().handler), base_url="http://upstream")
+    app = create_app(settings=s, embedder=FakeEmbedder(), http=http, reranker=AllowReranker())
+    async with app.router.lifespan_context(app):
+        rt = app.state.runtime
+        leaked = Flight("k:s")
+        leaked.last_progress_at -= 10  # already stale for a 0.05s timeout
+        rt.flights["k:s"] = leaked
+        # Poll until the reaper loop's next sweep evicts it (deadline, not a fixed sleep).
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while "k:s" in rt.flights and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        assert "k:s" not in rt.flights, "reaper loop must evict the leaked flight"
+        assert leaked.done.is_set(), "reaper resolved it so any follower would wake"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_follower_of_aborted_leader_gets_error_frame(tmp_path, api_key):
     """End-to-end at the flight boundary: a stream follower on a flight the leader
     failed receives an error frame + [DONE] and does not hang."""

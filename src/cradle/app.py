@@ -15,6 +15,7 @@ from cradle.cache import l1 as l1mod
 from cradle.cache import l2 as l2mod
 from cradle.config import Settings, load_settings
 from cradle.embeddings.base import Embedder
+from cradle.gateway.flight import reap_stale_flights
 from cradle.gateway.routes import router
 from cradle.metrics import prometheus as m
 from cradle.runtime import Runtime
@@ -180,9 +181,36 @@ def create_app(
                     pass
 
         task = asyncio.create_task(purge_loop())
+
+        # Single-flight reaper (#67): sweep runtime.flights for leaked leaders (a
+        # flight left unresolved because Starlette cancelled a stream response before
+        # its _wrap_stream generator was ever iterated, so its finally never ran).
+        # Only meaningful when singleflight is on; otherwise the registry stays empty,
+        # so skip the wakeup loop entirely on the default deployment.
+        reaper_task: asyncio.Task[None] | None = None
+        if settings.cache.singleflight:
+            timeout_s = settings.upstream.timeout_s
+
+            async def reaper_loop() -> None:
+                while not stop.is_set():
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=timeout_s)
+                    except TimeoutError:
+                        pass
+                    if stop.is_set():
+                        return
+                    try:
+                        reap_stale_flights(runtime, timeout_s)
+                    except Exception:
+                        log.exception("flight reaper sweep failed")
+
+            reaper_task = asyncio.create_task(reaper_loop())
+
         yield
         stop.set()
         task.cancel()
+        if reaper_task is not None:
+            reaper_task.cancel()
         # Let in-flight L2 audits finish (bounded) so their observations land.
         await runtime.drain_audits()
         embed_pool.shutdown(wait=False)

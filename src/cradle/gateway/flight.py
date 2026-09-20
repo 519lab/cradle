@@ -213,6 +213,37 @@ def is_stale(flight: Flight, timeout_s: float) -> bool:
     return (time.monotonic() - flight.last_progress_at) > timeout_s
 
 
+def reap_stale_flights(runtime: Runtime, timeout_s: float) -> int:
+    """Sweep the registry once, resolving+removing any LEAKED flight — one that is
+    stale AND not yet done (#67). Returns the count reaped.
+
+    The register seam only replaces a stale slot when an identical request happens
+    to arrive; a flight leaked with no follow-up arrival (e.g. Starlette cancels a
+    stream response before its `_wrap_stream` generator is ever iterated, so its
+    `finally` never runs — an unstarted generator does not run `finally`) would
+    otherwise sit in the registry poisoning the key until an arrival evicts it.
+    This background sweep evicts it regardless.
+
+    Reaping on staleness is safe only because `is_stale` measures from
+    `last_progress_at`, bumped on every `publish()` (#65): a healthy long/slow
+    stream keeps its clock fresh and is never reaped; only a leader that has made
+    no progress for `timeout_s` (a genuine leak or a wedged upstream) qualifies.
+    A `done` flight is mid-release, not leaked, so it is left alone. Resolution
+    goes through `resolve_and_release` (the identity-checked pop, #64), so a slot
+    already replaced by a live leader is never evicted by the reaper."""
+    reaped = 0
+    for flight in list(runtime.flights.values()):
+        if flight.done.is_set() or not is_stale(flight, timeout_s):
+            continue
+        m.flight_aborts.labels(reason="stale").inc()
+        resolve_and_release(runtime, flight, error={
+            "error": {"message": "single-flight leader made no progress; reaped",
+                      "type": "server_error", "code": "upstream_error"}
+        })
+        reaped += 1
+    return reaped
+
+
 # --- Follower response paths -----------------------------------------------
 
 
