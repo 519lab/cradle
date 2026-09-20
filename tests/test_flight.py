@@ -276,6 +276,120 @@ async def test_leader_generator_abort_fails_flight_and_clears_registry(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_reaper_clears_an_unstarted_leaked_generator(tmp_path, api_key):
+    """#67: an UNSTARTED _wrap_stream generator (Starlette cancels the response before
+    it ever pulls a frame) never runs its finally, so the registered flight leaks —
+    `done` unset, slot retained. The background reaper must resolve+evict it once it
+    goes stale. Deliberately NEVER starts the generator (no __anext__), which is the
+    exact path the disconnect-mid-stream test above does not cover."""
+    import cradle.gateway.stream as st
+    from cradle.cache.records import Principal
+    from cradle.compress.engine import compress
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight, reap_stale_flights
+    from cradle.gateway.models import ChatMessage, ChatRequest
+    from cradle.gateway.sse import StreamAccumulator
+
+    s = _settings(tmp_path, api_key)
+    principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+    req = ChatRequest(model="m", stream=True, messages=[ChatMessage(role="user", content="leak")])
+    compressed = compress(req.messages, s, "m")
+    flight = Flight("k:s")
+
+    class _RT:
+        settings = s
+        flights = {"k:s": flight}
+
+    rt = _RT()
+
+    class _Resp:
+        async def aiter_lines(self):
+            yield ""  # never reached — the generator is never started
+
+        async def aclose(self):
+            pass
+
+    ctx = RequestContext(request_id="r", principal=principal)
+    ctx.layer_hit = "miss"
+    ctx.flight = flight
+
+    # Construct the generator but NEVER iterate it: its finally will never run.
+    gen = st._wrap_stream(rt, req, ctx, None, compressed, _Resp(),
+                          StreamAccumulator(outbound_id="o", outbound_created=1, model="m"))
+
+    timeout_s = s.upstream.timeout_s
+    # A fresh flight is not yet stale: the reaper must leave it alone.
+    assert reap_stale_flights(rt, timeout_s) == 0
+    assert rt.flights == {"k:s": flight}
+    assert not flight.done.is_set()
+
+    # Age it past the staleness bound (the leaked generator never publishes, so in
+    # production last_progress_at simply never advances; here we backdate it).
+    flight.last_progress_at -= timeout_s + 1
+    reaped = reap_stale_flights(rt, timeout_s)
+
+    assert reaped == 1
+    assert flight.done.is_set(), "reaper must resolve the leaked flight so followers wake"
+    assert flight.error is not None, "reaped flight fails (not finishes) so followers get an error"
+    assert rt.flights == {}, "reaper must evict the leaked slot so the key is no longer poisoned"
+
+    await gen.aclose()  # tidy the never-started generator
+
+
+def test_resolution_is_idempotent_first_wins(tmp_path, api_key):
+    """#67 follow-up: fail()/finish() are no-ops once the flight is resolved, so a
+    leader that finishes AFTER the reaper already failed it in the same tick does not
+    overwrite the error (which would make _follow_json serve an error for a leader
+    that actually succeeded), and vice-versa. The FIRST resolution wins."""
+    from cradle.gateway.flight import Flight
+
+    # reaper failed it, then the real leader finishes: error stays, completion ignored.
+    f = Flight("k:j")
+    f.fail({"error": {"message": "reaped", "type": "server_error"}})
+    assert f.done.is_set()
+    f.finish({"id": "late", "choices": [{"message": {"content": "hi"}}]})
+    assert f.error is not None, "a late finish must not clear the reaper's error"
+    assert f.completion is None, "a late finish must not overwrite the resolved state"
+
+    # leader finished, then a stray fail (e.g. raise-guard after finally): completion stays.
+    g = Flight("k:j")
+    g.finish({"id": "ok", "choices": [{"message": {"content": "answer"}}]})
+    g.fail({"error": {"message": "late abort", "type": "server_error"}})
+    assert g.completion is not None, "a late fail must not clobber a successful completion"
+    assert g.error is None, "a late fail must not set an error on a finished flight"
+
+
+@pytest.mark.asyncio
+async def test_reaper_loop_runs_under_lifespan_and_evicts_a_leak(tmp_path, api_key):
+    """#67: the reaper background task wired into the lifespan actually evicts a leaked
+    flight (covers the loop glue, not just reap_stale_flights). Uses a tiny
+    upstream.timeout_s so the sweep fires fast, and polls with a deadline (the
+    codebase's non-flaky pattern) rather than asserting on a fixed sleep."""
+    from cradle.config import UpstreamSettings
+    from cradle.gateway.flight import Flight
+
+    s = _settings(tmp_path, api_key)
+    # Rebuild with a tiny staleness/sweep interval so the reaper fires promptly.
+    s = s.model_copy(update={
+        "upstream": UpstreamSettings(base_url="http://upstream/v1", models_passthrough=False, timeout_s=0.05),
+    })
+    http = httpx.AsyncClient(transport=httpx.MockTransport(GatedUpstream().handler), base_url="http://upstream")
+    app = create_app(settings=s, embedder=FakeEmbedder(), http=http, reranker=AllowReranker())
+    async with app.router.lifespan_context(app):
+        rt = app.state.runtime
+        leaked = Flight("k:s")
+        leaked.last_progress_at -= 10  # already stale for a 0.05s timeout
+        rt.flights["k:s"] = leaked
+        # Poll until the reaper loop's next sweep evicts it (deadline, not a fixed sleep).
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while "k:s" in rt.flights and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        assert "k:s" not in rt.flights, "reaper loop must evict the leaked flight"
+        assert leaked.done.is_set(), "reaper resolved it so any follower would wake"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_follower_of_aborted_leader_gets_error_frame(tmp_path, api_key):
     """End-to-end at the flight boundary: a stream follower on a flight the leader
     failed receives an error frame + [DONE] and does not hang."""
@@ -519,6 +633,50 @@ async def test_upstream_error_propagates_to_followers(tmp_path, api_key):
 
     assert up.calls == 1
     assert all(r.status_code == 502 for r in resps), [r.status_code for r in resps]
+    assert app.state.runtime.flights == {}
+
+
+@pytest.mark.asyncio
+async def test_json_followers_relay_leader_upstream_status_and_headers(tmp_path, api_key):
+    """#73: a JSON follower must reflect the leader's REAL upstream status (429) and
+    forwardable headers (retry-after, x-ratelimit-*), not a generic 502 with no
+    backoff header — otherwise a coalesced client can't honor the upstream's backoff.
+    The leader and its followers should all carry the same status + retry-after."""
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        auth = _auth(api_key)
+
+        async def rate_limited(request: httpx.Request) -> httpx.Response:
+            up.calls += 1
+            await up.release.wait()
+            return httpx.Response(
+                429,
+                json={"error": {"message": "slow down", "type": "rate_limit", "code": "rate_limited"}},
+                headers={"retry-after": "42", "x-ratelimit-remaining": "0"},
+            )
+
+        app.state.runtime.http = httpx.AsyncClient(
+            transport=httpx.MockTransport(rate_limited), base_url="http://upstream"
+        )
+        N = 3
+        tasks = [
+            asyncio.ensure_future(client.post("/v1/chat/completions", headers=auth, json=_body("hi")))
+            for _ in range(N)
+        ]
+        await _wait_for_followers(app, N - 1)
+        up.release.set()
+        resps = await asyncio.gather(*tasks)
+        await app.state.runtime.http.aclose()
+
+    assert up.calls == 1, "one upstream call; the other two coalesced as followers"
+    for r in resps:
+        assert r.status_code == 429, f"follower must relay the leader's 429, got {r.status_code}"
+        assert r.headers.get("retry-after") == "42", (
+            f"follower must carry the leader's retry-after: {dict(r.headers)}"
+        )
+        assert r.headers.get("x-ratelimit-remaining") == "0"
+        assert r.json()["error"]["message"] == "slow down", "follower relays the real upstream body"
+    # At least the two followers carried X-Cradle-Flight: follower.
+    assert sum(r.headers.get("X-Cradle-Flight") == "follower" for r in resps) == N - 1
     assert app.state.runtime.flights == {}
 
 

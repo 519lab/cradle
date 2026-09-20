@@ -47,6 +47,8 @@ class Flight:
         "_new_frame",
         "completion",
         "error",
+        "error_status",
+        "error_headers",
         "followers",
     )
 
@@ -66,6 +68,15 @@ class Flight:
         self._new_frame = asyncio.Event()  # pulsed on each publish so tailers wake
         self.completion: dict | None = None  # canonical result for JSON followers
         self.error: dict | None = None  # OpenAI-shaped error object if leader failed
+        # A JSON leader's real upstream status + forwardable headers on an upstream
+        # error, so a JSON follower relays the leader's true 429/503 + retry-after/
+        # x-ratelimit-* instead of a generic 502 (#73). None → the follower uses the
+        # 502 default. Stream followers can't use these: their StreamingResponse
+        # status/headers are committed at join time (follow()), before the leader's
+        # outcome is known, so a stream leader's status/headers reach followers only
+        # inside a frame body (already handled by #72).
+        self.error_status: int | None = None
+        self.error_headers: dict[str, str] | None = None
         self.followers = 0  # live follower count (feeds the metric AND tests)
 
     def publish(self, frame: bytes) -> None:
@@ -78,13 +89,33 @@ class Flight:
         self._new_frame = asyncio.Event()
 
     def finish(self, completion: dict) -> None:
-        """Leader succeeded: publish the completion dict and wake all waiters."""
+        """Leader succeeded: publish the completion dict and wake all waiters.
+        A no-op if already resolved (idempotent): the FIRST resolution wins, so a
+        leader that finishes after the reaper already failed its flight (#67) does
+        not overwrite the error, and a raise-guard + finally double-call is safe."""
+        if self.done.is_set():
+            return
         self.completion = completion
         self.done.set()
 
-    def fail(self, error: dict) -> None:
-        """Leader failed/aborted: publish an OpenAI-shaped error and wake waiters."""
+    def fail(
+        self,
+        error: dict,
+        *,
+        status: int | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        """Leader failed/aborted: publish an OpenAI-shaped error and wake waiters.
+        ``status``/``headers`` carry the leader's real upstream status + forwardable
+        headers so a JSON follower relays them instead of a generic 502 (#73).
+        A no-op if already resolved (idempotent): the FIRST resolution wins, so the
+        reaper cannot clobber a flight that finished successfully in the same tick,
+        and a raise-guard + finally double-call is safe."""
+        if self.done.is_set():
+            return
         self.error = error
+        self.error_status = status
+        self.error_headers = headers
         self.done.set()
 
     async def tail(self, cursor: int) -> AsyncIterator[bytes]:
@@ -155,7 +186,13 @@ def flight_key(key: str, stream: bool) -> str:
 
 
 def resolve_and_release(
-    runtime: Runtime, flight: Flight, *, completion: dict | None = None, error: dict | None = None
+    runtime: Runtime,
+    flight: Flight,
+    *,
+    completion: dict | None = None,
+    error: dict | None = None,
+    error_status: int | None = None,
+    error_headers: dict[str, str] | None = None,
 ) -> None:
     """Resolve a leader's flight and remove it from the registry — the one place
     that mutates ``runtime.flights`` on leader exit (#64).
@@ -165,9 +202,12 @@ def resolve_and_release(
     no longer owns its key — an unconditional ``pop(flight.key)`` would delete the
     *replacement* leader's live flight, defeating coalescing and spawning a
     duplicate upstream call. `finish`/`fail` are idempotent (`done` is an Event),
-    so calling this twice (e.g. a raise-guard then a finally) is safe."""
+    so calling this twice (e.g. a raise-guard then a finally) is safe.
+
+    ``error_status``/``error_headers`` (error path only) carry the leader's real
+    upstream status + forwardable headers for a JSON follower to relay (#73)."""
     if error is not None:
-        flight.fail(error)
+        flight.fail(error, status=error_status, headers=error_headers)
     else:
         flight.finish(completion or {})
     if runtime.flights.get(flight.key) is flight:
@@ -181,6 +221,40 @@ def is_stale(flight: Flight, timeout_s: float) -> bool:
     no matter how long its total lifetime; a JSON leader (no frames) or a wedged
     stream leader goes stale after timeout_s of silence."""
     return (time.monotonic() - flight.last_progress_at) > timeout_s
+
+
+def reap_stale_flights(runtime: Runtime, timeout_s: float) -> int:
+    """Sweep the registry once, resolving+removing any LEAKED flight — one that is
+    stale AND not yet done (#67). Returns the count reaped.
+
+    The register seam only replaces a stale slot when an identical request happens
+    to arrive; a flight leaked with no follow-up arrival (e.g. Starlette cancels a
+    stream response before its `_wrap_stream` generator is ever iterated, so its
+    `finally` never runs — an unstarted generator does not run `finally`) would
+    otherwise sit in the registry poisoning the key until an arrival evicts it.
+    This background sweep evicts it regardless.
+
+    Reaping on staleness is safe only because `is_stale` measures from
+    `last_progress_at`, bumped on every `publish()` (#65): a healthy long/slow
+    stream keeps its clock fresh and is never reaped; only a leader that has made
+    no progress for `timeout_s` (a genuine leak or a wedged upstream) qualifies.
+    A `done` flight is mid-release, not leaked, so it is left alone. Resolution
+    goes through `resolve_and_release` (the identity-checked pop, #64), so a slot
+    already replaced by a live leader is never evicted by the reaper."""
+    reaped = 0
+    for flight in list(runtime.flights.values()):
+        # done.is_set() re-checked here (not only implied by fail()'s idempotency
+        # guard) so a leader that resolved between the snapshot and now is neither
+        # counted as an abort nor re-resolved.
+        if flight.done.is_set() or not is_stale(flight, timeout_s):
+            continue
+        m.flight_aborts.labels(reason="stale").inc()
+        resolve_and_release(runtime, flight, error={
+            "error": {"message": "single-flight leader made no progress; reaped",
+                      "type": "server_error", "code": "upstream_error"}
+        })
+        reaped += 1
+    return reaped
 
 
 # --- Follower response paths -----------------------------------------------
@@ -228,8 +302,17 @@ async def _follow_json(
     if flight.error is not None:
         m.flight_aborts.labels(reason="leader_error").inc()
         _observe(ctx)
-        log_request(runtime.settings, ctx, None, error_status=502)
-        return JSONResponse(flight.error, status_code=502, headers=_follower_headers(ctx))
+        # Relay the leader's real upstream status + forwardable headers (retry-after,
+        # x-ratelimit-*) so a follower's backoff on a 429/503 works, matching what the
+        # leader's own client got (#73). >=500 collapses to 502 exactly as
+        # _upstream_error_response does; a leader that failed with no captured status
+        # (a non-UpstreamError abort) keeps the 502 default.
+        status = 502
+        if flight.error_status is not None:
+            status = 502 if flight.error_status >= 500 else flight.error_status
+        headers = {**_follower_headers(ctx), **(flight.error_headers or {})}
+        log_request(runtime.settings, ctx, None, error_status=status)
+        return JSONResponse(flight.error, status_code=status, headers=headers)
     _observe(ctx)
     log_request(runtime.settings, ctx, flight.completion)
     return JSONResponse(flight.completion, headers=_follower_headers(ctx))
