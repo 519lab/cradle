@@ -412,6 +412,16 @@ request), unlike the other default-on hot-path flags. Flip to default-on after a
 test container shows zero stuck flights and `cradle_flight_followers_total > 0` under a concurrent-identical
 burst.
 
+**Do not enable it before that soak, and the soak is blocked on three known bugs.** The pre-merge
+multi-model review of #58 found three CRITICAL concurrency defects that were merged unfixed (latent only
+because the flag is off): **#63** — a stream leader whose upstream fails *on open* never resolves its flight,
+poisoning the key for ~`upstream.timeout_s` (followers hang then 504); **#64** — the leader `finally`
+pops the registry by key, not identity, so a stale leader deletes the replacement flight that took its slot
+(defeating coalescing, spawning a duplicate upstream call); **#65** — `is_stale` measures from flight
+*creation*, so a healthy long or backpressured stream is treated as leaked, which triggers #64 on the happy
+path and times out followers of a succeeding leader. Enabling the flag (even for the soak) hits all three;
+they must be fixed first, or the soak's `timeout`/`stale` aborts will be the bugs, not real leaks.
+
 ### Consequences
 
 One upstream call and one writeback per burst; followers count as misses with `upstream_prompt_tokens = 0`
