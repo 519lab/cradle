@@ -121,6 +121,13 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
     acc = StreamAccumulator(
         outbound_id=outbound_id, outbound_created=outbound_created, model=req.model
     )
+    # Stash the open upstream response on the flight so the reaper can close it if
+    # this generator leaks — Starlette can cancel the response before ever iterating
+    # _wrap_stream, so its finally (which owns resp.aclose()) never runs (#77). The
+    # generator still closes resp itself on every path it actually runs; aclose() is
+    # idempotent, so a reaper close + a later generator close is harmless.
+    if ctx.flight is not None:
+        ctx.flight.upstream_resp = resp
     return StreamingResponse(
         _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc),
         media_type="text/event-stream",
@@ -375,8 +382,15 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             # carries the same top-level fields a live wrap-stream response does.
             **acc.extra_top,
         }
+        # Commit followers to this success BEFORE publishing finish (#76): _pub()
+        # publishes the finish frame to followers during arg evaluation, before this
+        # generator suspends at the yield. If completion_out were set only after the
+        # yield resumed, a client disconnect AT the yield (GeneratorExit) would leave
+        # it None → the finally would fail a flight whose followers already hold the
+        # complete answer + finish frame. No await between here and the publish, so
+        # either both happen or neither.
+        completion_out = completion
         yield _pub(encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason)))
-        completion_out = completion  # followers are now committed to this success (#70)
         # The client only sees a usage chunk when it asked for one (OpenAI semantics),
         # even though Cradle always requests usage upstream on the wrap path. The
         # usage frame is NOT published to the flight — each follower emits its own

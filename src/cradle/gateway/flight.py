@@ -17,6 +17,7 @@ leak degrades to a per-request error, never an infinite hang.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -34,6 +35,8 @@ from cradle.metrics import prometheus as m
 if TYPE_CHECKING:
     from cradle.runtime import Runtime
 
+log = logging.getLogger("cradle.flight")
+
 
 class Flight:
     """One in-flight leader upstream call that followers coalesce onto."""
@@ -49,11 +52,19 @@ class Flight:
         "error",
         "error_status",
         "error_headers",
+        "upstream_resp",
+        "is_stream",
         "followers",
     )
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, *, is_stream: bool | None = None) -> None:
         self.key = key
+        # Whether this flight is a streaming leader. The reaper only reaps a stream
+        # flight (#76), so this must be explicit, not inferred from response state.
+        # Defaults to the key's stream marker (flight_key appends ':s'/':j') so
+        # existing callers that build a keyed flight keep working; the production
+        # register seam passes it explicitly from req.stream.
+        self.is_stream = key.endswith(":s") if is_stream is None else is_stream
         self.created_at = time.monotonic()  # observability only (monotonic, not wall)
         # Staleness is measured from the LAST progress, not creation (#65): a stream
         # leader is only resolved after its whole body streams to its own client,
@@ -77,6 +88,11 @@ class Flight:
         # inside a frame body (already handled by #72).
         self.error_status: int | None = None
         self.error_headers: dict[str, str] | None = None
+        # The open upstream streaming response for a stream leader (#77). Stashed at
+        # the _miss_stream wrap seam so the reaper can close it if the leader's
+        # generator leaks (never iterated → its own finally, which owns aclose(),
+        # never runs). None for a JSON leader (its chat() response is already read).
+        self.upstream_resp: object | None = None
         self.followers = 0  # live follower count (feeds the metric AND tests)
 
     def publish(self, frame: bytes) -> None:
@@ -223,37 +239,65 @@ def is_stale(flight: Flight, timeout_s: float) -> bool:
     return (time.monotonic() - flight.last_progress_at) > timeout_s
 
 
-def reap_stale_flights(runtime: Runtime, timeout_s: float) -> int:
-    """Sweep the registry once, resolving+removing any LEAKED flight — one that is
-    stale AND not yet done (#67). Returns the count reaped.
+def _is_reapable(flight: Flight, timeout_s: float) -> bool:
+    """Whether the reaper may evict this flight (#67, narrowed by #76).
 
-    The register seam only replaces a stale slot when an identical request happens
-    to arrive; a flight leaked with no follow-up arrival (e.g. Starlette cancels a
-    stream response before its `_wrap_stream` generator is ever iterated, so its
-    `finally` never runs — an unstarted generator does not run `finally`) would
-    otherwise sit in the registry poisoning the key until an arrival evicts it.
-    This background sweep evicts it regardless.
+    ONLY a leaked *unstarted stream leader* qualifies: a **stream** flight (key
+    ends ``:s``) with **zero published frames** that is stale and not done. The
+    narrowing is what makes the reaper safe against a live leader (#76):
+    - A *started* `_wrap_stream` publishes the role frame on its first line, so any
+      live stream leader — even one backpressured at a downstream `yield`, or parked
+      in a hung writeback — has `frames` non-empty and is never reaped. The only
+      stream flight with zero frames past `timeout_s` is one whose generator was
+      never iterated (Starlette cancelled the response before pulling a frame, so
+      its `finally` never ran and it leaked).
+    - A **JSON** flight cannot leak this way at all: `_miss`'s ``try/finally``
+      resolves it on every path (including the upstream-error early return), behind
+      the register-site raise-guard, so it is excluded — a slow-but-live JSON leader
+      is never reaped."""
+    return (
+        flight.is_stream
+        and not flight.frames
+        and not flight.done.is_set()
+        and is_stale(flight, timeout_s)
+    )
 
-    Reaping on staleness is safe only because `is_stale` measures from
-    `last_progress_at`, bumped on every `publish()` (#65): a healthy long/slow
-    stream keeps its clock fresh and is never reaped; only a leader that has made
-    no progress for `timeout_s` (a genuine leak or a wedged upstream) qualifies.
-    A `done` flight is mid-release, not leaked, so it is left alone. Resolution
-    goes through `resolve_and_release` (the identity-checked pop, #64), so a slot
-    already replaced by a live leader is never evicted by the reaper."""
+
+async def reap_stale_flights(runtime: Runtime, timeout_s: float) -> int:
+    """Sweep the registry once, resolving+removing any LEAKED flight (#67). Returns
+    the count reaped. See `_is_reapable` for exactly what qualifies (a leaked
+    unstarted stream leader — narrowed by #76 so a live-but-quiet leader is never
+    failed out from under its followers).
+
+    A flight leaked with no follow-up arrival would otherwise sit in the registry
+    poisoning the key until an identical arrival evicts it; this background sweep
+    evicts it regardless. Resolution goes through `resolve_and_release` (the
+    identity-checked pop, #64), so a slot already replaced by a live leader is never
+    evicted by the reaper.
+
+    The registry mutation is done synchronously (no await between the reapable check
+    and the pop, so the identity invariant holds); the leaked upstream responses are
+    closed afterwards (#77) — a leaked unstarted `_wrap_stream` never ran its own
+    finally, so its `resp.aclose()` was never called. aclose() is idempotent, so a
+    generator that later does run its finally double-closing is harmless."""
+    to_close: list[object] = []
     reaped = 0
     for flight in list(runtime.flights.values()):
-        # done.is_set() re-checked here (not only implied by fail()'s idempotency
-        # guard) so a leader that resolved between the snapshot and now is neither
-        # counted as an abort nor re-resolved.
-        if flight.done.is_set() or not is_stale(flight, timeout_s):
+        if not _is_reapable(flight, timeout_s):
             continue
         m.flight_aborts.labels(reason="stale").inc()
+        if flight.upstream_resp is not None:
+            to_close.append(flight.upstream_resp)
         resolve_and_release(runtime, flight, error={
             "error": {"message": "single-flight leader made no progress; reaped",
                       "type": "server_error", "code": "upstream_error"}
         })
         reaped += 1
+    for resp in to_close:
+        try:
+            await resp.aclose()
+        except Exception:
+            log.warning("reaper: closing a leaked upstream response failed", exc_info=True)
     return reaped
 
 
