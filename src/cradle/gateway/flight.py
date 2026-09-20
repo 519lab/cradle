@@ -41,6 +41,7 @@ class Flight:
     __slots__ = (
         "key",
         "created_at",
+        "last_progress_at",
         "frames",
         "done",
         "_new_frame",
@@ -51,7 +52,15 @@ class Flight:
 
     def __init__(self, key: str) -> None:
         self.key = key
-        self.created_at = time.monotonic()  # staleness check (monotonic, not wall)
+        self.created_at = time.monotonic()  # observability only (monotonic, not wall)
+        # Staleness is measured from the LAST progress, not creation (#65): a stream
+        # leader is only resolved after its whole body streams to its own client,
+        # which can far exceed upstream.timeout_s for a long/slow-client stream —
+        # measuring from created_at would treat a healthy leader as leaked. Stamped
+        # here and bumped on every publish(); a JSON leader publishes no frames, so
+        # this stays at registration and JSON keeps creation-based semantics (its
+        # chat() call is genuinely bounded by the httpx timeout).
+        self.last_progress_at = self.created_at
         self.frames: list[bytes] = []  # published outbound frames, up to finish_frame
         self.done = asyncio.Event()  # set when the leader finishes or fails
         self._new_frame = asyncio.Event()  # pulsed on each publish so tailers wake
@@ -64,6 +73,7 @@ class Flight:
         for every frame up to and including finish_frame (NOT the usage frame or
         [DONE] — each follower emits its own, per its own include_usage flag)."""
         self.frames.append(frame)
+        self.last_progress_at = time.monotonic()  # a live leader is not stale (#65)
         self._new_frame.set()
         self._new_frame = asyncio.Event()
 
@@ -145,8 +155,12 @@ def flight_key(key: str, stream: bool) -> str:
 
 
 def is_stale(flight: Flight, timeout_s: float) -> bool:
-    """A flight older than the upstream timeout is assumed leaked; replace it."""
-    return (time.monotonic() - flight.created_at) > timeout_s
+    """A flight with no progress for longer than the upstream timeout is assumed
+    leaked; replace it. Measured from last_progress_at, not created_at (#65), so a
+    healthy stream leader that keeps publishing frames is never treated as stale
+    no matter how long its total lifetime; a JSON leader (no frames) or a wedged
+    stream leader goes stale after timeout_s of silence."""
+    return (time.monotonic() - flight.last_progress_at) > timeout_s
 
 
 # --- Follower response paths -----------------------------------------------
@@ -212,9 +226,19 @@ async def _follow_stream(
             yield flight.frames[i]
             cursor = i + 1
         try:
-            async with asyncio.timeout(timeout):
+            # Progress deadline, not a total-duration bound (#65): a follower of a
+            # healthy long stream must not time out while the leader is still
+            # publishing. Reschedule the deadline timeout_s into the future on every
+            # frame; it fires only after timeout_s of no new frames (a wedged leader).
+            loop = asyncio.get_running_loop()
+            # timeout_at takes an ABSOLUTE deadline (unlike asyncio.timeout, which is
+            # a relative delay); reschedule() also takes an absolute time, so the two
+            # match. A relative asyncio.timeout(loop.time()+timeout) would set the
+            # deadline ~2x into the future and never fire.
+            async with asyncio.timeout_at(loop.time() + timeout) as deadline:
                 async for frame in flight.tail(cursor):
                     yield frame
+                    deadline.reschedule(loop.time() + timeout)
         except TimeoutError:
             m.flight_aborts.labels(reason="timeout").inc()
             yield encode_chunk(error_frame("upstream single-flight leader timed out"))
