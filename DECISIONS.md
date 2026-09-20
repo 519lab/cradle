@@ -432,8 +432,9 @@ leader — and closing that leak's orphaned upstream response (#77); **#68** was
 frame + dict-in-message), and **#73** (JSON followers losing the leader's upstream status/backoff headers) are
 fixed; **#71** (the follow-check/register burst race) is **accepted as a known limitation** (see below);
 **#76**/**#77** (the reaper-liveness, finish-window and leaked-response defects a codex review found in the
-above work) are fixed, and **#78** (a register-seam orphan-follower delay, pre-existing to #57) is a tracked
-follow-up. The soak gate stands regardless: the failure
+above work) are fixed, and **#78** (a register-seam orphan-follower delay, pre-existing to #57 — a follower
+on a stale flight waited its full timeout instead of waking when the seam replaced the flight) is fixed by
+failing the stale flight at the seam before replacing it. The soak gate stands regardless: the failure
 mode of a leaked flight is uniquely bad (a hung request), so default-on waits on the soak evidence above even
 now that these bugs are closed.
 

@@ -292,6 +292,18 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             return await follow(runtime, req, ctx, existing)
         if existing is not mine:  # stale flight held the slot — replace it and lead
             m.flight_aborts.labels(reason="stale").inc()
+            # Wake any follower that joined the stale flight just before it went stale
+            # (#78): without this it stays parked on the old flight — now an orphan no
+            # longer in the registry, so neither this seam nor the reaper resolves it —
+            # and only errors after its full timeout, even though we lead a fresh call
+            # right here. fail() it directly, NOT resolve_and_release: the slot is
+            # reassigned to `mine` on the next line, so an identity-checked pop would
+            # match `mine`, not `existing`. fail() is idempotent, so a stale-but-still-
+            # running leader that later resolves itself is unaffected.
+            existing.fail({
+                "error": {"message": "single-flight leader went stale; a fresh call led",
+                          "type": "server_error", "code": "upstream_error"}
+            })
             runtime.flights[fkey] = mine
         ctx.flight = mine
     if ctx.flight is None:

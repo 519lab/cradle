@@ -459,6 +459,59 @@ def test_resolution_is_idempotent_first_wins(tmp_path, api_key):
 
 
 @pytest.mark.asyncio
+async def test_stale_replacement_wakes_a_parked_follower(tmp_path, api_key):
+    """#78: a follower that joined a flight just before it went stale must wake
+    IMMEDIATELY when the register seam replaces that stale flight — not wait out its
+    full timeout on the orphan. Drives the REAL register seam (handle_chat's _miss)
+    with a stale flight pre-seeded in runtime.flights and a follower parked on it with
+    a LARGE timeout (30s); asserts the follower returns within a SHORT wait (2s). A
+    pass therefore cannot come from the follower's own timeout firing — only from the
+    seam failing the stale flight. Pre-fix (no fail() at the seam) the follower is
+    never woken and the 2s wait raises TimeoutError."""
+    from cradle.cache.records import Principal
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight, _follow_json
+    from cradle.gateway.models import ChatMessage, ChatRequest
+    from cradle.gateway.pipeline import handle_chat  # entry that contains the seam
+    from cradle.normalize import cache_namespace, canonicalize, l1_key
+    from cradle.upstream.route import resolve_upstream
+
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        runtime = app.state.runtime
+        principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+        # An identical request whose canonical key we can compute for the flight slot,
+        # using the same resolve/namespace/canonicalize handle_chat uses.
+        req = ChatRequest(model="m", stream=False,
+                          messages=[ChatMessage(role="user", content="stalerepl")])
+        upstream_name, upstream = resolve_upstream(runtime.settings, req.model)
+        ns = cache_namespace(upstream_name, upstream.base_url)
+        canonical = canonicalize(req, principal, runtime.settings, backend_namespace=ns)
+        fkey = f"{l1_key(canonical)}:j"
+
+        # Pre-seed a STALE leader at the slot and park a follower on it.
+        stale = Flight(fkey, is_stream=False)
+        stale.last_progress_at -= runtime.settings.upstream.timeout_s + 5  # genuinely stale
+        runtime.flights[fkey] = stale
+        fctx = RequestContext(request_id="follower", principal=principal)
+        fctx.layer_hit = "miss"
+        follower = asyncio.ensure_future(_follow_json(runtime, req, fctx, stale, timeout=30.0))
+        await asyncio.sleep(0)  # park on stale.done.wait()
+        assert not stale.done.is_set()
+
+        # Drive the real second request through handle_chat: it L1-misses, reaches the
+        # register seam, sees `stale` is stale, and (with the #78 fix) fails it before
+        # leading. Its upstream is gated so it stays a leader; we only need the seam.
+        lead_ctx = RequestContext(request_id="leader2", principal=principal)
+        up.release.set()  # let the new leader's upstream return promptly
+        lead = asyncio.ensure_future(handle_chat(runtime, req, lead_ctx))
+
+        # The follower must wake from the seam's fail(), well within its own 30s budget.
+        resp = await asyncio.wait_for(follower, timeout=2.0)  # pre-fix: TimeoutError
+        assert resp.status_code == 502, "the woken follower serves the stale-leader error"
+        await lead  # let the replacement leader finish cleanly
+
+
+@pytest.mark.asyncio
 async def test_reaper_never_reaps_a_live_leader(tmp_path, api_key):
     """#76: the reaper must NOT reap a live-but-quiet leader. A started stream leader
     has published at least the role frame (frames non-empty), so a backpressured or
