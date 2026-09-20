@@ -50,7 +50,7 @@ from cradle.gateway.writeback import (
     cache_skip_reason,
     passthrough_skip_reason,
     record_from,
-    writeback,
+    writeback_best_effort,
 )
 from cradle.logging_setup import log_request
 from cradle.metrics import prometheus as m
@@ -251,7 +251,11 @@ async def _maybe_cache_passthrough(runtime, req, ctx, vec, compressed, acc: Stre
             ctx.upstream_prompt_tokens,
             ttl,
         )
-        await writeback(runtime, ctx.canonical, vec, rec)
+        # Best-effort (#70): this runs AFTER the whole body was teed to the client
+        # (this path has no flight, so no followers), and it sits outside the
+        # caller's Exception handler — a raw writeback raise here would propagate out
+        # of an already-streamed generator and skip log_request. Count + log instead.
+        await writeback_best_effort(runtime, ctx.canonical, vec, rec)
     elif skip is not None:
         m.cache_write_skips.labels(reason=skip).inc()
     log_request(runtime.settings, ctx, completion if skip is None else None)
@@ -264,10 +268,13 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
     # Single-flight (#57): publish each SUCCESS-path frame to the flight so
     # followers replay them; leave the error-frame and [DONE] yields UNwrapped, so
     # an aborted leader publishes no partial answer. Resolution is centralised in
-    # the finally: completion_out stays None on every early return / exception, so
-    # those paths fail() the flight; only a clean finish sets it and finish()es.
-    # abort_reason/abort_body carry the true cause to followers and the metric
-    # (default "leader_disconnect" for an exception; each error return overrides it).
+    # the finally: completion_out stays None on every early return / exception
+    # BEFORE the finish_frame is published, so those paths fail() the flight;
+    # publishing finish commits the followers to success and sets completion_out
+    # right away (#70), so a later client disconnect or a cache-write error can no
+    # longer flip that committed success into a follower abort. abort_reason/
+    # abort_body carry the true cause to followers and the metric (default
+    # "leader_disconnect" for an exception; each error return overrides it).
     def _pub(frame: bytes) -> bytes:
         if ctx.flight is not None:
             ctx.flight.publish(frame)
@@ -288,8 +295,16 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             piece = parse_and_accumulate(line, acc)
             if acc.error:
                 abort_reason = "upstream_error"
-                abort_body = {"error": {"message": acc.error_payload or "upstream error",
-                                        "type": "server_error", "code": "upstream_error"}}
+                # acc.error_payload is the upstream error OBJECT ({message,type,code,...}),
+                # so wrap it once as {"error": <obj>} (#72) — the old code put the whole
+                # dict into the string "message" field. This abort_body becomes
+                # flight.error and is served to both follower paths verbatim.
+                abort_body = (
+                    {"error": acc.error_payload}
+                    if acc.error_payload
+                    else {"error": {"message": "upstream error",
+                                    "type": "server_error", "code": "upstream_error"}}
+                )
                 yield encode_chunk(error_frame(acc.error_payload or "upstream error"))
                 yield encode_done()
                 return
@@ -327,18 +342,14 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
         suffix = wrap_suffix(compressed.template, acc.content)
         if suffix:
             yield _pub(encode_chunk(content_frame(outbound_id, outbound_created, req.model, suffix)))
-        yield _pub(encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason)))
-        # The client only sees a usage chunk when it asked for one (OpenAI semantics),
-        # even though Cradle always requests usage upstream on the wrap path. The
-        # usage frame is NOT published to the flight — each follower emits its own
-        # per its own include_usage flag.
-        if _include_usage(req) and acc.usage:
-            yield encode_chunk(
-                usage_frame(
-                    outbound_id, outbound_created, req.model, acc.usage, acc.extra_top or None
-                )
-            )
-        yield encode_done()
+        # Assemble the completion BEFORE publishing finish_frame (#70): publishing
+        # finish commits followers to a successful replay (they build their own usage
+        # frame + [DONE] from flight.completion), and everything after — the client's
+        # usage/[DONE] yields and the cache writeback — no longer changes what a
+        # follower receives. Building completion here (it reads only acc/compressed)
+        # lets completion_out be set the instant finish is published, so a client
+        # disconnect at the usage/[DONE] yields or a writeback backend error can no
+        # longer flip an already-streamed success into a follower abort.
         usage = acc.usage or {}
         ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)
         body = wrap_content(compressed.template, acc.content)
@@ -364,6 +375,19 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             # carries the same top-level fields a live wrap-stream response does.
             **acc.extra_top,
         }
+        yield _pub(encode_chunk(finish_frame(outbound_id, outbound_created, req.model, acc.finish_reason)))
+        completion_out = completion  # followers are now committed to this success (#70)
+        # The client only sees a usage chunk when it asked for one (OpenAI semantics),
+        # even though Cradle always requests usage upstream on the wrap path. The
+        # usage frame is NOT published to the flight — each follower emits its own
+        # per its own include_usage flag.
+        if _include_usage(req) and acc.usage:
+            yield encode_chunk(
+                usage_frame(
+                    outbound_id, outbound_created, req.model, acc.usage, acc.extra_top or None
+                )
+            )
+        yield encode_done()
         ttl = _effective_ttl(runtime, ctx)
         skip = cache_skip_reason(completion)
         if ctx.cache_no_store or ttl == 0:
@@ -381,12 +405,14 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
                 ctx.upstream_prompt_tokens,
                 ttl,
             )
-            await writeback(runtime, ctx.canonical, vec, rec)
+            # Best-effort: the answer already streamed to the client and followers
+            # (completion_out is set), so a cache-write backend error must not fail
+            # them — it is counted + logged, not raised (#70).
+            await writeback_best_effort(runtime, ctx.canonical, vec, rec)
         elif skip is not None:
             m.cache_write_skips.labels(reason=skip).inc()
         _observe(ctx)
         log_request(runtime.settings, ctx, completion)
-        completion_out = completion  # marks a clean success for the finally
     except asyncio.CancelledError:
         acc.client_connected = False
         # The success-path line runs after the body streams, so a client that

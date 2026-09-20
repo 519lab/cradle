@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,8 @@ from cradle.normalize import l1_key
 
 if TYPE_CHECKING:
     from cradle.runtime import Runtime
+
+log = logging.getLogger("cradle.writeback")
 
 
 def _embed_hash(text: str) -> str:
@@ -147,6 +150,28 @@ async def writeback(
         # approximate bump: an upsert that updates an existing point over-counts
         # by one until the purge loop's count_points() reconciles the true value.
         m.l2_points.inc()
+
+
+async def writeback_best_effort(
+    runtime: Runtime,
+    canonical: CanonicalRequest,
+    vec: list[float] | None,
+    record: CacheRecord,
+) -> None:
+    """Write to cache, treating a backend failure as non-fatal (#70).
+
+    The cache write is the LAST step of a successful miss: the answer has already
+    reached the client (and, on the single-flight path, already committed the
+    flight to success — followers are replaying it). An L1/L2 backend error here
+    must not turn that success into an error response, and on the stream path must
+    not append a trailing error frame onto an already-completed SSE body. Count it
+    and log the traceback (never silent — an error is never just log noise), then
+    return normally. CancelledError propagates (Exception only)."""
+    try:
+        await writeback(runtime, canonical, vec, record)
+    except Exception:
+        m.cache_write_errors.inc()
+        log.exception("cache writeback failed for key %s (answer already served)", record.key)
 
 
 async def promote_l2_hit(

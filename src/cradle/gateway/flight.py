@@ -271,7 +271,11 @@ async def _follow_stream(
             return
         if flight.error is not None:
             m.flight_aborts.labels(reason="leader_error").inc()
-            yield encode_chunk(error_frame(flight.error))
+            # flight.error is ALREADY the OpenAI-shaped object ({"error": {...}}) that
+            # every leader resolve site sets and _follow_json returns verbatim (#72).
+            # error_frame() would wrap it a second time → {"error": {"error": {...}}};
+            # emit it directly so the stream follower's error matches the JSON one.
+            yield encode_chunk(flight.error)
             yield encode_done()
             return
         # Success: the leader published through finish_frame. Emit this follower's

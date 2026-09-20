@@ -42,7 +42,7 @@ from cradle.gateway.writeback import (
     cache_skip_reason,
     promote_l2_hit,
     record_from,
-    writeback,
+    writeback_best_effort,
 )
 from cradle.logging_setup import log_request
 from cradle.metrics import prometheus as m
@@ -419,6 +419,11 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
         skip = cache_skip_reason(merged)
         if ctx.cache_no_store or ttl == 0:
             skip = skip or "no_store"
+        # The upstream answer is complete and reconstructed; the leader has
+        # succeeded. Commit followers to it (out = merged) BEFORE the cache write
+        # (#70) so a writeback backend error can't flip this success into a 502 for
+        # every follower — the write is best-effort (counted + logged, not raised).
+        out = merged  # marks a clean success for the finally
         if ctx.layer_hit != "bypass" and ctx.canonical is not None and skip is None:
             rec = record_from(
                 ctx.canonical,
@@ -427,12 +432,11 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
                 ctx.upstream_prompt_tokens,
                 ttl,
             )
-            await writeback(runtime, ctx.canonical, vec, rec)
+            await writeback_best_effort(runtime, ctx.canonical, vec, rec)
         elif skip is not None:
             m.cache_write_skips.labels(reason=skip).inc()
         _observe(ctx)
         log_request(runtime.settings, ctx, merged)
-        out = merged  # marks a clean success for the finally
         return JSONResponse(merged, headers=_headers(ctx))
     finally:
         if ctx.flight is not None:
