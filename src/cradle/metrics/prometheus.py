@@ -50,6 +50,13 @@ cache_write_skips = Counter(
     ["reason"],
     registry=REGISTRY,
 )
+cache_write_errors = Counter(
+    "cradle_cache_write_errors_total",
+    "Cacheable responses whose writeback raised (L1/L2 backend error). "
+    "The answer still reached the client (and single-flight followers) intact; "
+    "only the cache write failed — distinct from a write-quality SKIP.",
+    registry=REGISTRY,
+)
 cache_probes = Counter(
     "cradle_cache_probes_total",
     "Probe-mode requests (decision explained, nothing served or written)",

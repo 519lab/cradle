@@ -101,6 +101,27 @@ def _parse_error_frame(sse_text: str) -> dict:
     raise AssertionError(f"no error frame found in SSE stream: {sse_text!r}")
 
 
+def _assert_clean_stream_end(sse_text: str) -> None:
+    """Assert the SSE stream ends cleanly: [DONE] is the last data frame and NO data
+    frame carries an `error` key. A substring scan for "error" can't verify this —
+    it both misses an error frame appended AFTER [DONE] (the #70 corruption) and
+    false-positives on answer text containing the word 'error'. Structural instead."""
+    payloads = [
+        line[len("data: "):].strip()
+        for line in sse_text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert payloads, f"no data frames in stream: {sse_text!r}"
+    assert payloads[-1] == "[DONE]", f"stream must end at [DONE], not {payloads[-1]!r}"
+    for p in payloads:
+        if p == "[DONE]":
+            continue
+        obj = json.loads(p)
+        assert not (isinstance(obj, dict) and "error" in obj), (
+            f"error frame in a stream that should have ended cleanly: {p!r}"
+        )
+
+
 @asynccontextmanager
 async def _driver(tmp_path, api_key, singleflight=True):
     up = GatedUpstream()
@@ -553,6 +574,89 @@ async def test_stream_leader_midstream_error_gives_followers_clean_message(tmp_p
         assert inner.get("message") == "boom", (
             f"message must be the upstream string, not a nested dict: {inner!r}"
         )
+    assert app.state.runtime.flights == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_writeback_failure_does_not_corrupt_followers(tmp_path, api_key, monkeypatch):
+    """#70: a cache writeback backend error on the wrap-stream LEADER must not fail
+    its followers — the answer already streamed to them. Before the fix, completion_out
+    was set only after writeback, so a raise failed the flight and appended an error
+    frame + [DONE] onto an already-completed follower stream."""
+    from cradle.gateway import stream as st
+    from cradle.gateway import writeback as wbmod
+
+    async def _boom(runtime, canonical, vec, record):
+        raise RuntimeError("l1 backend down")
+
+    # New code writes via writeback_best_effort, which calls the module-global
+    # writeback in wbmod. Pre-fix stream.py called `writeback` bound into it by a
+    # from-import, so also patch that name (raising=False → no-op on current code) —
+    # otherwise the fail-before run never injects the failure and proves nothing.
+    monkeypatch.setattr(wbmod, "writeback", _boom)
+    monkeypatch.setattr(st, "writeback", _boom, raising=False)
+    errors_before = m.cache_write_errors._value.get()
+
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        auth = _auth(api_key)
+        N = 3
+        tasks = [
+            asyncio.ensure_future(
+                client.post("/v1/chat/completions", headers=auth, json=_body("hi", stream=True))
+            )
+            for _ in range(N)
+        ]
+        await _wait_for_followers(app, N - 1)
+        up.release.set()
+        resps = await asyncio.gather(*tasks)
+
+    assert up.calls == 1, "leader made the single upstream call; followers coalesced"
+    for r in resps:
+        text = r.text
+        # The corruption #70 names: an error frame appended AFTER [DONE]. Assert
+        # structurally that the stream ends at [DONE] with no error frame anywhere,
+        # and still carries the real answer.
+        _assert_clean_stream_end(text)
+        assert "ACK-" in text, f"follower must carry the real answer: {text!r}"
+    # The failure was counted + swallowed (proves the best-effort helper ran).
+    assert m.cache_write_errors._value.get() == errors_before + 1
+    assert app.state.runtime.flights == {}
+
+
+@pytest.mark.asyncio
+async def test_json_writeback_failure_does_not_fail_followers(tmp_path, api_key, monkeypatch):
+    """#70 (JSON path): a writeback backend error on a JSON leader must not turn its
+    success into a 502 for every follower. Before the fix, `out` was set only after
+    writeback, so a raise failed the flight and followers got 502 for an answer the
+    leader had successfully obtained."""
+    from cradle.gateway import pipeline as pl
+    from cradle.gateway import writeback as wbmod
+
+    async def _boom(runtime, canonical, vec, record):
+        raise RuntimeError("l1 backend down")
+
+    # See the stream test: patch both the helper's module-global writeback and the
+    # name pre-fix pipeline.py bound via from-import (raising=False → no-op now).
+    monkeypatch.setattr(wbmod, "writeback", _boom)
+    monkeypatch.setattr(pl, "writeback", _boom, raising=False)
+    errors_before = m.cache_write_errors._value.get()
+
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        auth = _auth(api_key)
+        N = 3
+        tasks = [
+            asyncio.ensure_future(client.post("/v1/chat/completions", headers=auth, json=_body("hi")))
+            for _ in range(N)
+        ]
+        await _wait_for_followers(app, N - 1)
+        up.release.set()
+        resps = await asyncio.gather(*tasks)
+
+    assert up.calls == 1
+    for r in resps:
+        assert r.status_code == 200, f"writeback failure must not 502 a follower: {r.status_code}"
+        assert r.json()["choices"][0]["message"]["content"], "follower carries the real answer"
+    assert m.cache_write_errors._value.get() == errors_before + 1
     assert app.state.runtime.flights == {}
 
 

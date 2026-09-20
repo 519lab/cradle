@@ -343,7 +343,9 @@ async def test_maybe_cache_passthrough_gates(tmp_path, api_key, monkeypatch):
     async def _fake_writeback(runtime, canon, vec, rec):
         writes.append(rec)
 
-    monkeypatch.setattr(st, "writeback", _fake_writeback)
+    # _maybe_cache_passthrough now writes via writeback_best_effort (#70), so patch
+    # that bound name — the from-imported symbol the passthrough path actually calls.
+    monkeypatch.setattr(st, "writeback_best_effort", _fake_writeback)
 
     class _RT:
         settings = s
