@@ -428,9 +428,25 @@ background reaper that sweeps `runtime.flights` for a stale-and-not-done leak ev
 the flag is on; **#68** was split per defect — **#70** (post-finish writeback failure corrupting an
 already-served response), **#72** (double-wrapped follower error frame + dict-in-message), and **#73** (JSON
 followers losing the leader's upstream status/backoff headers) are fixed; **#71** (the follow-check/register
-burst race — partial coalescing plus a possible duplicate upstream call in a first-tick burst) remains open,
-gated off the same soak. The soak gate stands regardless: the failure mode of a leaked flight is uniquely bad
-(a hung request), so default-on waits on the soak evidence above even now that these bugs are closed.
+burst race) is **accepted as a known limitation** (see below). The soak gate stands regardless: the failure
+mode of a leaked flight is uniquely bad (a hung request), so default-on waits on the soak evidence above even
+now that these bugs are closed.
+
+### Known limitation: first-tick embed/L2 duplication (#71)
+
+The single-flight follow-check runs *before* embed/L2, but the register (`setdefault`) runs *after* L2, with
+`await` points (`_maybe_embed`, `l2mod.query`) between. In a simultaneous first-tick burst, every arrival
+passes the follow-check before any of them registers, so all run embed + the full L2 query (serialising on the
+single-worker embed pool); only arrivals that come in *after* the leader registers skip that work. Coalescing
+to **one upstream call still holds** — `setdefault` is the concurrency control, and the losers become late
+followers — so the feature's headline promise is intact; the cost is N embeds/L2 queries for a burst of N
+instead of one. There is one correctness edge: if a peer's L2 query completes after the leader's writeback
+lands, that peer can L2-hit and (only when `l2.audit_rate > 0`, default `0`) schedule an audit that makes a
+**second** upstream call. Accepted rather than fixed because the fix — reserving a placeholder flight at the
+follow-check seam — adds a new lifecycle state (reserved-but-not-yet-leading, with its own resolve/release
+path on a failed reservation) to the exact registry surface #63/#64/#65 just stabilized, a poor
+risk/benefit trade for a partial-coalescing degradation behind a default-off flag. Revisit if the soak shows
+embed-pool saturation under real bursts. (#71)
 
 ### Consequences
 
