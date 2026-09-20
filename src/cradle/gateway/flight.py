@@ -248,17 +248,22 @@ async def _follow_stream(
         try:
             # Progress deadline, not a total-duration bound (#65): a follower of a
             # healthy long stream must not time out while the leader is still
-            # publishing. Reschedule the deadline timeout_s into the future on every
-            # frame; it fires only after timeout_s of no new frames (a wedged leader).
-            loop = asyncio.get_running_loop()
-            # timeout_at takes an ABSOLUTE deadline (unlike asyncio.timeout, which is
-            # a relative delay); reschedule() also takes an absolute time, so the two
-            # match. A relative asyncio.timeout(loop.time()+timeout) would set the
-            # deadline ~2x into the future and never fire.
-            async with asyncio.timeout_at(loop.time() + timeout) as deadline:
-                async for frame in flight.tail(cursor):
+            # publishing. The timeout must bound ONLY the wait for the next leader
+            # frame, never the downstream `yield` — a slow follower CLIENT taking a
+            # while to consume a frame it already received must not count as the
+            # leader being stuck. So wait_for wraps __anext__ (re-armed per frame),
+            # and the yield sits outside it. wait_for cancels the pending __anext__
+            # on timeout, so aclose() lets tail()'s finally cancel its own waiters.
+            frames = flight.tail(cursor)
+            try:
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(frames.__anext__(), timeout)
+                    except StopAsyncIteration:
+                        break
                     yield frame
-                    deadline.reschedule(loop.time() + timeout)
+            finally:
+                await frames.aclose()
         except TimeoutError:
             m.flight_aborts.labels(reason="timeout").inc()
             yield encode_chunk(error_frame("upstream single-flight leader timed out"))

@@ -546,3 +546,54 @@ def test_healthy_publishing_leader_is_not_stale(tmp_path, api_key):
     assert is_stale(f, timeout_s=120.0), "a silent long-lived flight is stale"
     f.publish(b"data: frame\n\n")  # a live leader publishes → bumps last_progress_at
     assert not is_stale(f, timeout_s=120.0), "a leader that just published is NOT stale"
+
+
+@pytest.mark.asyncio
+async def test_follower_not_timed_out_by_slow_own_consumption(tmp_path, api_key, monkeypatch):
+    """#65 follower deadline must bound only the wait for the next LEADER frame, not
+    downstream delivery. A follower whose own client consumes slowly, while the leader
+    keeps publishing, must NOT hit the timeout (regression for the codex finding: the
+    old asyncio.timeout_at wrapped the yield, so a slow follower tripped its own
+    deadline even with a healthy leader)."""
+    import cradle.gateway.flight as flmod
+    from cradle.cache.records import Principal
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight, follow
+    from cradle.gateway.models import ChatMessage, ChatRequest
+
+    monkeypatch.setattr(flmod, "_FOLLOWER_TIMEOUT_SLACK_S", 0.0)
+    s = _settings(tmp_path, api_key)
+    s.upstream.timeout_s = 0.1  # follower per-frame progress deadline = 0.1s (slack 0)
+    principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+    req = ChatRequest(model="m", stream=True, messages=[ChatMessage(role="user", content="t")])
+
+    class _RT:
+        settings = s
+
+    ctx = RequestContext(request_id="r", principal=principal)
+    ctx.layer_hit = "miss"
+    flight = Flight("k:s")
+
+    # The leader publishes each frame promptly — never idle longer than the 0.1s
+    # deadline — then finishes. The FOLLOWER's own client is slow: 0.15s per pull,
+    # LONGER than the deadline. Under the old code the deadline spanned `yield frame`,
+    # so a single slow downstream delivery (0.15s > 0.1s) tripped it even though the
+    # leader was healthy. The fix bounds only the wait for the next leader frame, so a
+    # slow follower can never trip it.
+    async def leader():
+        for i in range(4):
+            flight.publish(f"data: f{i}\n\n".encode())
+            await asyncio.sleep(0.02)
+        flight.finish({"id": "x", "created": 1, "model": "m", "usage": {}})
+
+    resp = await follow(_RT(), req, ctx, flight)
+    task = asyncio.ensure_future(leader())
+    chunks = []
+    async for c in resp.body_iterator:
+        chunks.append(c)
+        await asyncio.sleep(0.15)  # slow follower client: > the 0.1s deadline
+    await task
+    text = b"".join(c if isinstance(c, bytes) else c.encode() for c in chunks).decode()
+    assert "timed out" not in text.lower(), f"healthy leader must not time out a slow follower: {text!r}"
+    assert "data: [DONE]" in text
+    assert flight.followers == 0
