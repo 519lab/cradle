@@ -523,6 +523,50 @@ async def test_upstream_error_propagates_to_followers(tmp_path, api_key):
 
 
 @pytest.mark.asyncio
+async def test_json_followers_relay_leader_upstream_status_and_headers(tmp_path, api_key):
+    """#73: a JSON follower must reflect the leader's REAL upstream status (429) and
+    forwardable headers (retry-after, x-ratelimit-*), not a generic 502 with no
+    backoff header — otherwise a coalesced client can't honor the upstream's backoff.
+    The leader and its followers should all carry the same status + retry-after."""
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        auth = _auth(api_key)
+
+        async def rate_limited(request: httpx.Request) -> httpx.Response:
+            up.calls += 1
+            await up.release.wait()
+            return httpx.Response(
+                429,
+                json={"error": {"message": "slow down", "type": "rate_limit", "code": "rate_limited"}},
+                headers={"retry-after": "42", "x-ratelimit-remaining": "0"},
+            )
+
+        app.state.runtime.http = httpx.AsyncClient(
+            transport=httpx.MockTransport(rate_limited), base_url="http://upstream"
+        )
+        N = 3
+        tasks = [
+            asyncio.ensure_future(client.post("/v1/chat/completions", headers=auth, json=_body("hi")))
+            for _ in range(N)
+        ]
+        await _wait_for_followers(app, N - 1)
+        up.release.set()
+        resps = await asyncio.gather(*tasks)
+        await app.state.runtime.http.aclose()
+
+    assert up.calls == 1, "one upstream call; the other two coalesced as followers"
+    for r in resps:
+        assert r.status_code == 429, f"follower must relay the leader's 429, got {r.status_code}"
+        assert r.headers.get("retry-after") == "42", (
+            f"follower must carry the leader's retry-after: {dict(r.headers)}"
+        )
+        assert r.headers.get("x-ratelimit-remaining") == "0"
+        assert r.json()["error"]["message"] == "slow down", "follower relays the real upstream body"
+    # At least the two followers carried X-Cradle-Flight: follower.
+    assert sum(r.headers.get("X-Cradle-Flight") == "follower" for r in resps) == N - 1
+    assert app.state.runtime.flights == {}
+
+
+@pytest.mark.asyncio
 async def test_stream_leader_midstream_error_gives_followers_clean_message(tmp_path, api_key):
     """#72 Defect B: a wrap-stream leader whose upstream emits an error frame
     MID-STREAM (HTTP 200 body carrying `data: {"error": {...}}`) must give its

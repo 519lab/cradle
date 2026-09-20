@@ -398,6 +398,7 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
     # flight publishes no frames — only the completion dict — and only JSON callers
     # ever join it (the flight key is stream-scoped).
     out: dict | None = None
+    upstream_exc: UpstreamError | None = None
     try:
         t0 = time.perf_counter()
         try:
@@ -405,6 +406,9 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
                 runtime.http, target, payload, authorization=_client_auth(ctx)
             )
         except UpstreamError as exc:
+            # Remember it so the flight finally can hand followers the leader's REAL
+            # upstream status + retry/quota headers, not a generic 502 (#73).
+            upstream_exc = exc
             return _upstream_error_response(runtime, ctx, exc)
         ctx.t_upstream_s = time.perf_counter() - t0
         usage = completion.get("usage") or {}
@@ -442,7 +446,22 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
         if ctx.flight is not None:
             if out is not None:
                 resolve_and_release(runtime, ctx.flight, completion=out)
+            elif upstream_exc is not None:
+                # A real upstream failure: give followers the leader's actual error
+                # body, status and forwardable headers so their backoff matches the
+                # leader's own client (#73).
+                m.flight_aborts.labels(reason="upstream_error").inc()
+                body = upstream_exc.body if isinstance(upstream_exc.body, dict) else {
+                    "error": {"message": str(upstream_exc.body), "type": "server_error",
+                              "code": "upstream_error"}
+                }
+                resolve_and_release(
+                    runtime, ctx.flight, error=body,
+                    error_status=upstream_exc.status, error_headers=upstream_exc.headers,
+                )
             else:
+                # An abort with no captured upstream status (e.g. a non-UpstreamError
+                # raise). Followers get the generic 502 default.
                 m.flight_aborts.labels(reason="upstream_error").inc()
                 resolve_and_release(runtime, ctx.flight, error={
                     "error": {"message": "single-flight leader failed upstream",

@@ -251,7 +251,7 @@ only the configured tokens authenticate.
 | `X-Cradle-Rerank` | `pass:<score>` / `reject:<score>` / `fail-open` / `off` |
 | `X-Cradle-Volatile` | the volatility guard fired; value = reason |
 | `X-Cradle-Audit` | `scheduled` — a verified-L2 audit was queued for this hit |
-| `X-Cradle-Flight` | `follower` — this request was coalesced onto an in-flight leader's upstream call (single-flight, #57). Present only when `cache.singleflight` is on; the request is a MISS that made no upstream call. |
+| `X-Cradle-Flight` | `follower` — this request was coalesced onto an in-flight leader's upstream call (single-flight, #57). Present only when `cache.singleflight` is on; the request is a MISS that made no upstream call. If the leader's upstream **errored**, a JSON follower relays the leader's real status and backoff headers (e.g. a 429 with `retry-after`/`x-ratelimit-*`), not a blanket 502 (#73), so a coalesced client's backoff still works. |
 | `X-Request-ID` | Cradle's own request id (upstream's is relayed as `x-cradle-upstream-request-id`) |
 
 ---
