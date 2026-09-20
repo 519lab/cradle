@@ -16,7 +16,14 @@ from cradle.cache.volatility import volatile_reason_for
 from cradle.compress.engine import compress
 from cradle.gateway.audit import schedule_audit, should_audit
 from cradle.gateway.context import RequestContext
-from cradle.gateway.flight import Flight, flight_eligible, flight_key, follow, is_stale
+from cradle.gateway.flight import (
+    Flight,
+    flight_eligible,
+    flight_key,
+    follow,
+    is_stale,
+    resolve_and_release,
+)
 from cradle.gateway.models import ChatMessage, ChatRequest
 from cradle.gateway.probe import candidate_entry, probe_response
 from cradle.gateway.responses import (
@@ -287,7 +294,25 @@ async def handle_chat(runtime: Runtime, req: ChatRequest, ctx: RequestContext) -
             m.flight_aborts.labels(reason="stale").inc()
             runtime.flights[fkey] = mine
         ctx.flight = mine
-    return await _miss(runtime, req, ctx, vec=vec)
+    if ctx.flight is None:
+        return await _miss(runtime, req, ctx, vec=vec)
+    # Leader raise-guard (#63): the leaf miss paths resolve the flight in their own
+    # finally, but an exception RAISED before that finally is reached would leak the
+    # flight and poison the key. Fail+release it here if still unresolved, then
+    # re-raise (BaseException so CancelledError is covered; the unconditional re-raise
+    # preserves cancellation). Scope note: this catches a *raise*, not an early
+    # `return` — a leaf path that returns without resolving is NOT covered here (that
+    # is why _miss_stream's own UpstreamError branch resolves the flight directly).
+    # Idempotent with the leaf finally via the done.is_set() guard.
+    try:
+        return await _miss(runtime, req, ctx, vec=vec)
+    except BaseException:
+        if not ctx.flight.done.is_set():
+            resolve_and_release(runtime, ctx.flight, error={
+                "error": {"message": "single-flight leader failed", "type": "server_error",
+                          "code": "upstream_error"}
+            })
+        raise
 
 
 def _note_candidate(
@@ -412,11 +437,10 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
     finally:
         if ctx.flight is not None:
             if out is not None:
-                ctx.flight.finish(out)
+                resolve_and_release(runtime, ctx.flight, completion=out)
             else:
                 m.flight_aborts.labels(reason="upstream_error").inc()
-                ctx.flight.fail({
+                resolve_and_release(runtime, ctx.flight, error={
                     "error": {"message": "single-flight leader failed upstream",
                               "type": "server_error", "code": "upstream_error"}
                 })
-            runtime.flights.pop(ctx.flight.key, None)

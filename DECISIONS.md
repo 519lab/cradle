@@ -412,15 +412,23 @@ request), unlike the other default-on hot-path flags. Flip to default-on after a
 test container shows zero stuck flights and `cradle_flight_followers_total > 0` under a concurrent-identical
 burst.
 
-**Do not enable it before that soak, and the soak is blocked on three known bugs.** The pre-merge
-multi-model review of #58 found three CRITICAL concurrency defects that were merged unfixed (latent only
-because the flag is off): **#63** — a stream leader whose upstream fails *on open* never resolves its flight,
-poisoning the key for ~`upstream.timeout_s` (followers hang then 504); **#64** — the leader `finally`
-pops the registry by key, not identity, so a stale leader deletes the replacement flight that took its slot
-(defeating coalescing, spawning a duplicate upstream call); **#65** — `is_stale` measures from flight
-*creation*, so a healthy long or backpressured stream is treated as leaked, which triggers #64 on the happy
-path and times out followers of a succeeding leader. Enabling the flag (even for the soak) hits all three;
-they must be fixed first, or the soak's `timeout`/`stale` aborts will be the bugs, not real leaks.
+**Do not enable it before that soak.** The three CRITICAL concurrency defects the pre-merge multi-model
+review of #58 found — which had merged unfixed — are now **fixed** (they were latent only because the flag
+defaults off): **#63** — a stream leader whose upstream fails *on open* now resolve-and-releases its flight
+(a point fix in `_miss_stream` plus a register-site raise-guard) instead of leaking it and poisoning the
+key; **#64** — the registry pop is now identity-checked (`resolve_and_release()` in `flight.py`, the one
+place that mutates `runtime.flights` on leader exit), so a replaced stale leader can no longer delete the
+live replacement; **#65** — `is_stale` now measures from `last_progress_at` (bumped on every `publish()`),
+not flight creation, so a healthy long or backpressured stream is never treated as leaked, and the stream
+follower's timeout is a per-frame progress deadline (`asyncio.wait_for` around each `tail()` step, with the
+downstream `yield` outside it so a slow follower client cannot trip its own deadline) rather than a
+total-duration bound. Two lower-severity, self-healing gaps remain open and gated off the same soak:
+**#67** (an unstarted `_wrap_stream` generator leaks its flight on a client disconnect during
+`response.start` — bounded and evicted by staleness, not closeable from the request path) and **#68** (four
+HIGH/MEDIUM response-correctness gaps from the same review: post-finish writeback failure, the
+follow-check/register burst race, a double-wrapped follower error frame, and JSON followers losing the
+leader's upstream status). The soak gate stands regardless: the failure mode of a leaked flight is uniquely bad
+(a hung request), so default-on waits on the soak evidence above even now that these bugs are closed.
 
 ### Consequences
 

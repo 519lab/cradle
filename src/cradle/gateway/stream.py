@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from cradle.gateway.context import RequestContext
+from cradle.gateway.flight import resolve_and_release
 from cradle.gateway.responses import (
     _client_auth,
     _effective_ttl,
@@ -79,6 +80,16 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
             runtime.http, target, payload, authorization=_client_auth(ctx)
         )
     except UpstreamError as exc:
+        # #63: the flight is registered (ctx.flight) but _wrap_stream — the only place
+        # a stream flight is resolved — is never constructed on this early return, so
+        # without this the flight leaks and poisons the key for ~upstream.timeout_s.
+        # Fail+release it here so followers get a prompt error, not a ~125s hang.
+        if ctx.flight is not None:
+            m.flight_aborts.labels(reason="upstream_error").inc()
+            resolve_and_release(runtime, ctx.flight, error={
+                "error": {"message": "single-flight leader failed upstream at stream open",
+                          "type": "server_error", "code": "upstream_error"}
+            })
         return _upstream_error_response(runtime, ctx, exc)
     ctx.t_upstream_s = time.perf_counter() - t0
     headers = _sse_headers(ctx)
@@ -392,15 +403,14 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
         # completion_out None → the flight is failed; only a clean success set it.
         if ctx.flight is not None:
             if completion_out is not None:
-                ctx.flight.finish(completion_out)
+                resolve_and_release(runtime, ctx.flight, completion=completion_out)
             else:
                 # abort_reason/abort_body carry the true cause: upstream_error,
                 # unexpected_tool_call and truncated_stream override the default
                 # leader_disconnect set for a raised CancelledError/GeneratorExit.
                 m.flight_aborts.labels(reason=abort_reason).inc()
-                ctx.flight.fail(abort_body or {
+                resolve_and_release(runtime, ctx.flight, error=abort_body or {
                     "error": {"message": "single-flight leader aborted",
                               "type": "server_error", "code": "upstream_error"}
                 })
-            runtime.flights.pop(ctx.flight.key, None)
         await resp.aclose()

@@ -41,6 +41,7 @@ class Flight:
     __slots__ = (
         "key",
         "created_at",
+        "last_progress_at",
         "frames",
         "done",
         "_new_frame",
@@ -51,7 +52,15 @@ class Flight:
 
     def __init__(self, key: str) -> None:
         self.key = key
-        self.created_at = time.monotonic()  # staleness check (monotonic, not wall)
+        self.created_at = time.monotonic()  # observability only (monotonic, not wall)
+        # Staleness is measured from the LAST progress, not creation (#65): a stream
+        # leader is only resolved after its whole body streams to its own client,
+        # which can far exceed upstream.timeout_s for a long/slow-client stream —
+        # measuring from created_at would treat a healthy leader as leaked. Stamped
+        # here and bumped on every publish(); a JSON leader publishes no frames, so
+        # this stays at registration and JSON keeps creation-based semantics (its
+        # chat() call is genuinely bounded by the httpx timeout).
+        self.last_progress_at = self.created_at
         self.frames: list[bytes] = []  # published outbound frames, up to finish_frame
         self.done = asyncio.Event()  # set when the leader finishes or fails
         self._new_frame = asyncio.Event()  # pulsed on each publish so tailers wake
@@ -64,6 +73,7 @@ class Flight:
         for every frame up to and including finish_frame (NOT the usage frame or
         [DONE] — each follower emits its own, per its own include_usage flag)."""
         self.frames.append(frame)
+        self.last_progress_at = time.monotonic()  # a live leader is not stale (#65)
         self._new_frame.set()
         self._new_frame = asyncio.Event()
 
@@ -144,9 +154,33 @@ def flight_key(key: str, stream: bool) -> str:
     return f"{key}:{'s' if stream else 'j'}"
 
 
+def resolve_and_release(
+    runtime: Runtime, flight: Flight, *, completion: dict | None = None, error: dict | None = None
+) -> None:
+    """Resolve a leader's flight and remove it from the registry — the one place
+    that mutates ``runtime.flights`` on leader exit (#64).
+
+    The pop is **identity-checked**: it removes the slot only if it still holds
+    *this* flight. A leader that was declared stale and replaced (register seam)
+    no longer owns its key — an unconditional ``pop(flight.key)`` would delete the
+    *replacement* leader's live flight, defeating coalescing and spawning a
+    duplicate upstream call. `finish`/`fail` are idempotent (`done` is an Event),
+    so calling this twice (e.g. a raise-guard then a finally) is safe."""
+    if error is not None:
+        flight.fail(error)
+    else:
+        flight.finish(completion or {})
+    if runtime.flights.get(flight.key) is flight:
+        del runtime.flights[flight.key]
+
+
 def is_stale(flight: Flight, timeout_s: float) -> bool:
-    """A flight older than the upstream timeout is assumed leaked; replace it."""
-    return (time.monotonic() - flight.created_at) > timeout_s
+    """A flight with no progress for longer than the upstream timeout is assumed
+    leaked; replace it. Measured from last_progress_at, not created_at (#65), so a
+    healthy stream leader that keeps publishing frames is never treated as stale
+    no matter how long its total lifetime; a JSON leader (no frames) or a wedged
+    stream leader goes stale after timeout_s of silence."""
+    return (time.monotonic() - flight.last_progress_at) > timeout_s
 
 
 # --- Follower response paths -----------------------------------------------
@@ -212,9 +246,24 @@ async def _follow_stream(
             yield flight.frames[i]
             cursor = i + 1
         try:
-            async with asyncio.timeout(timeout):
-                async for frame in flight.tail(cursor):
+            # Progress deadline, not a total-duration bound (#65): a follower of a
+            # healthy long stream must not time out while the leader is still
+            # publishing. The timeout must bound ONLY the wait for the next leader
+            # frame, never the downstream `yield` — a slow follower CLIENT taking a
+            # while to consume a frame it already received must not count as the
+            # leader being stuck. So wait_for wraps __anext__ (re-armed per frame),
+            # and the yield sits outside it. wait_for cancels the pending __anext__
+            # on timeout, so aclose() lets tail()'s finally cancel its own waiters.
+            frames = flight.tail(cursor)
+            try:
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(frames.__anext__(), timeout)
+                    except StopAsyncIteration:
+                        break
                     yield frame
+            finally:
+                await frames.aclose()
         except TimeoutError:
             m.flight_aborts.labels(reason="timeout").inc()
             yield encode_chunk(error_frame("upstream single-flight leader timed out"))

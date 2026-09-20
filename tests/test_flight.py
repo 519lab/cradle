@@ -475,3 +475,125 @@ async def test_upstream_error_propagates_to_followers(tmp_path, api_key):
     assert up.calls == 1
     assert all(r.status_code == 502 for r in resps), [r.status_code for r in resps]
     assert app.state.runtime.flights == {}
+
+
+# --- Registry-correctness regressions (#63/#64/#65) --------------------------
+
+
+def test_stale_leader_does_not_evict_its_replacement(tmp_path, api_key):
+    """#64: a stale leader whose slot was replaced must NOT delete the replacement
+    flight when it finally exits. resolve_and_release pops by IDENTITY, not by key —
+    an unconditional pop(key) would remove the live replacement, defeating coalescing
+    and spawning a duplicate upstream call. Unit-level: no followers needed."""
+    from cradle.gateway.flight import Flight, resolve_and_release
+
+    class _RT:
+        flights: dict = {}
+
+    rt = _RT()
+    a = Flight("k:s")
+    b = Flight("k:s")
+    rt.flights["k:s"] = a          # A is the leader
+    rt.flights["k:s"] = b          # A went stale; register seam replaced it with B
+    assert rt.flights["k:s"] is b
+    # A finishes late and resolves. It no longer owns the slot, so it must leave B.
+    resolve_and_release(rt, a, completion={"ok": 1})
+    assert rt.flights.get("k:s") is b, "A's exit must not evict the live replacement B"
+    # B finishes normally and correctly removes itself.
+    resolve_and_release(rt, b, completion={"ok": 2})
+    assert rt.flights == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_open_failure_resolves_and_removes_flight(tmp_path, api_key):
+    """#63: when the upstream fails at stream OPEN, _miss_stream returns an error
+    before _wrap_stream is ever built — its resolving finally never runs. The flight
+    (registered by the leader) must still be resolved and removed, so later identical
+    requests do not join a dead flight and hang ~upstream.timeout_s."""
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        # Swap upstream for one that 500s at open (no gating — fail immediately).
+        async def err_handler(request: httpx.Request) -> httpx.Response:
+            up.calls += 1
+            return httpx.Response(500, json={"error": {"message": "open boom", "type": "server_error"}})
+
+        app.state.runtime.http = httpx.AsyncClient(
+            transport=httpx.MockTransport(err_handler), base_url="http://upstream"
+        )
+        auth = _auth(api_key)
+        r = await client.post("/v1/chat/completions", headers=auth, json=_body("openfail", stream=True))
+        assert r.status_code >= 500
+        # The key must be free — a stream leader that failed at open left no dead flight.
+        assert app.state.runtime.flights == {}, "open-failure must resolve+remove the flight"
+        # A second identical request leads afresh (calls upstream again), not hangs.
+        r2 = await client.post("/v1/chat/completions", headers=auth, json=_body("openfail", stream=True))
+        assert r2.status_code >= 500
+        assert up.calls == 2, "second request must lead afresh, not join a dead flight"
+        await app.state.runtime.http.aclose()
+
+
+def test_healthy_publishing_leader_is_not_stale(tmp_path, api_key):
+    """#65: staleness is measured from last progress, not creation. A leader whose
+    total lifetime exceeds upstream.timeout_s but which is still publishing frames is
+    NOT stale (a long/slow stream), while a silent leader past the timeout IS."""
+    import time as _time
+
+    from cradle.gateway.flight import Flight, is_stale
+
+    f = Flight("k:s")
+    # Force the flight "old" by creation, but keep progress recent.
+    f.created_at = _time.monotonic() - 1000.0
+    f.last_progress_at = f.created_at
+    assert is_stale(f, timeout_s=120.0), "a silent long-lived flight is stale"
+    f.publish(b"data: frame\n\n")  # a live leader publishes → bumps last_progress_at
+    assert not is_stale(f, timeout_s=120.0), "a leader that just published is NOT stale"
+
+
+@pytest.mark.asyncio
+async def test_follower_not_timed_out_by_slow_own_consumption(tmp_path, api_key, monkeypatch):
+    """#65 follower deadline must bound only the wait for the next LEADER frame, not
+    downstream delivery. A follower whose own client consumes slowly, while the leader
+    keeps publishing, must NOT hit the timeout (regression for the codex finding: the
+    old asyncio.timeout_at wrapped the yield, so a slow follower tripped its own
+    deadline even with a healthy leader)."""
+    import cradle.gateway.flight as flmod
+    from cradle.cache.records import Principal
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight, follow
+    from cradle.gateway.models import ChatMessage, ChatRequest
+
+    monkeypatch.setattr(flmod, "_FOLLOWER_TIMEOUT_SLACK_S", 0.0)
+    s = _settings(tmp_path, api_key)
+    s.upstream.timeout_s = 0.1  # follower per-frame progress deadline = 0.1s (slack 0)
+    principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+    req = ChatRequest(model="m", stream=True, messages=[ChatMessage(role="user", content="t")])
+
+    class _RT:
+        settings = s
+
+    ctx = RequestContext(request_id="r", principal=principal)
+    ctx.layer_hit = "miss"
+    flight = Flight("k:s")
+
+    # The leader publishes each frame promptly — never idle longer than the 0.1s
+    # deadline — then finishes. The FOLLOWER's own client is slow: 0.15s per pull,
+    # LONGER than the deadline. Under the old code the deadline spanned `yield frame`,
+    # so a single slow downstream delivery (0.15s > 0.1s) tripped it even though the
+    # leader was healthy. The fix bounds only the wait for the next leader frame, so a
+    # slow follower can never trip it.
+    async def leader():
+        for i in range(4):
+            flight.publish(f"data: f{i}\n\n".encode())
+            await asyncio.sleep(0.02)
+        flight.finish({"id": "x", "created": 1, "model": "m", "usage": {}})
+
+    resp = await follow(_RT(), req, ctx, flight)
+    task = asyncio.ensure_future(leader())
+    chunks = []
+    async for c in resp.body_iterator:
+        chunks.append(c)
+        await asyncio.sleep(0.15)  # slow follower client: > the 0.1s deadline
+    await task
+    text = b"".join(c if isinstance(c, bytes) else c.encode() for c in chunks).decode()
+    assert "timed out" not in text.lower(), f"healthy leader must not time out a slow follower: {text!r}"
+    assert "data: [DONE]" in text
+    assert flight.followers == 0
