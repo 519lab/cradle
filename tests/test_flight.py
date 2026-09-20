@@ -336,6 +336,29 @@ async def test_reaper_clears_an_unstarted_leaked_generator(tmp_path, api_key):
     await gen.aclose()  # tidy the never-started generator
 
 
+def test_resolution_is_idempotent_first_wins(tmp_path, api_key):
+    """#67 follow-up: fail()/finish() are no-ops once the flight is resolved, so a
+    leader that finishes AFTER the reaper already failed it in the same tick does not
+    overwrite the error (which would make _follow_json serve an error for a leader
+    that actually succeeded), and vice-versa. The FIRST resolution wins."""
+    from cradle.gateway.flight import Flight
+
+    # reaper failed it, then the real leader finishes: error stays, completion ignored.
+    f = Flight("k:j")
+    f.fail({"error": {"message": "reaped", "type": "server_error"}})
+    assert f.done.is_set()
+    f.finish({"id": "late", "choices": [{"message": {"content": "hi"}}]})
+    assert f.error is not None, "a late finish must not clear the reaper's error"
+    assert f.completion is None, "a late finish must not overwrite the resolved state"
+
+    # leader finished, then a stray fail (e.g. raise-guard after finally): completion stays.
+    g = Flight("k:j")
+    g.finish({"id": "ok", "choices": [{"message": {"content": "answer"}}]})
+    g.fail({"error": {"message": "late abort", "type": "server_error"}})
+    assert g.completion is not None, "a late fail must not clobber a successful completion"
+    assert g.error is None, "a late fail must not set an error on a finished flight"
+
+
 @pytest.mark.asyncio
 async def test_reaper_loop_runs_under_lifespan_and_evicts_a_leak(tmp_path, api_key):
     """#67: the reaper background task wired into the lifespan actually evicts a leaked

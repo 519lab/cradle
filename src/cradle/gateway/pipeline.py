@@ -410,6 +410,14 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
             # upstream status + retry/quota headers, not a generic 502 (#73).
             upstream_exc = exc
             return _upstream_error_response(runtime, ctx, exc)
+        # Real progress: the JSON leader's upstream call returned. A JSON flight
+        # publishes no frames, so without this its last_progress_at stays at
+        # registration and the reaper (#67) would treat a leader whose upstream ran
+        # longer than upstream.timeout_s as leaked and fail it out from under its
+        # followers. Bumping here — the same progress signal publish() gives the
+        # stream path (#65) — moves the reap deadline past the upstream call.
+        if ctx.flight is not None:
+            ctx.flight.last_progress_at = time.monotonic()
         ctx.t_upstream_s = time.perf_counter() - t0
         usage = completion.get("usage") or {}
         ctx.upstream_prompt_tokens = int(usage.get("prompt_tokens") or compressed.compressed_tokens)

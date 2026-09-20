@@ -89,7 +89,12 @@ class Flight:
         self._new_frame = asyncio.Event()
 
     def finish(self, completion: dict) -> None:
-        """Leader succeeded: publish the completion dict and wake all waiters."""
+        """Leader succeeded: publish the completion dict and wake all waiters.
+        A no-op if already resolved (idempotent): the FIRST resolution wins, so a
+        leader that finishes after the reaper already failed its flight (#67) does
+        not overwrite the error, and a raise-guard + finally double-call is safe."""
+        if self.done.is_set():
+            return
         self.completion = completion
         self.done.set()
 
@@ -102,7 +107,12 @@ class Flight:
     ) -> None:
         """Leader failed/aborted: publish an OpenAI-shaped error and wake waiters.
         ``status``/``headers`` carry the leader's real upstream status + forwardable
-        headers so a JSON follower relays them instead of a generic 502 (#73)."""
+        headers so a JSON follower relays them instead of a generic 502 (#73).
+        A no-op if already resolved (idempotent): the FIRST resolution wins, so the
+        reaper cannot clobber a flight that finished successfully in the same tick,
+        and a raise-guard + finally double-call is safe."""
+        if self.done.is_set():
+            return
         self.error = error
         self.error_status = status
         self.error_headers = headers
@@ -233,6 +243,9 @@ def reap_stale_flights(runtime: Runtime, timeout_s: float) -> int:
     already replaced by a live leader is never evicted by the reaper."""
     reaped = 0
     for flight in list(runtime.flights.values()):
+        # done.is_set() re-checked here (not only implied by fail()'s idempotency
+        # guard) so a leader that resolved between the snapshot and now is neither
+        # counted as an abort nor re-resolved.
         if flight.done.is_set() or not is_stale(flight, timeout_s):
             continue
         m.flight_aborts.labels(reason="stale").inc()
