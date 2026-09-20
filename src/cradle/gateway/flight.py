@@ -154,6 +154,26 @@ def flight_key(key: str, stream: bool) -> str:
     return f"{key}:{'s' if stream else 'j'}"
 
 
+def resolve_and_release(
+    runtime: Runtime, flight: Flight, *, completion: dict | None = None, error: dict | None = None
+) -> None:
+    """Resolve a leader's flight and remove it from the registry — the one place
+    that mutates ``runtime.flights`` on leader exit (#64).
+
+    The pop is **identity-checked**: it removes the slot only if it still holds
+    *this* flight. A leader that was declared stale and replaced (register seam)
+    no longer owns its key — an unconditional ``pop(flight.key)`` would delete the
+    *replacement* leader's live flight, defeating coalescing and spawning a
+    duplicate upstream call. `finish`/`fail` are idempotent (`done` is an Event),
+    so calling this twice (e.g. a raise-guard then a finally) is safe."""
+    if error is not None:
+        flight.fail(error)
+    else:
+        flight.finish(completion or {})
+    if runtime.flights.get(flight.key) is flight:
+        del runtime.flights[flight.key]
+
+
 def is_stale(flight: Flight, timeout_s: float) -> bool:
     """A flight with no progress for longer than the upstream timeout is assumed
     leaked; replace it. Measured from last_progress_at, not created_at (#65), so a
