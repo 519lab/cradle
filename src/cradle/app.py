@@ -200,7 +200,7 @@ def create_app(
                     if stop.is_set():
                         return
                     try:
-                        reap_stale_flights(runtime, timeout_s)
+                        await reap_stale_flights(runtime, timeout_s)
                     except Exception:
                         log.exception("flight reaper sweep failed")
 

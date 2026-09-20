@@ -276,6 +276,69 @@ async def test_leader_generator_abort_fails_flight_and_clears_registry(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_disconnect_at_finish_yield_still_succeeds_for_followers(tmp_path, api_key):
+    """#76-A: the finish frame is published to followers during arg evaluation of
+    `yield _pub(finish_frame)`, BEFORE the generator suspends at that yield. A client
+    disconnect exactly at that yield must NOT flip the flight to failed — followers
+    already hold the complete answer + finish frame. completion_out is now set before
+    the finish publish, so the flight resolves as SUCCESS."""
+    import cradle.gateway.stream as st
+    from cradle.cache.records import Principal
+    from cradle.compress.engine import compress
+    from cradle.gateway.context import RequestContext
+    from cradle.gateway.flight import Flight
+    from cradle.gateway.models import ChatMessage, ChatRequest
+    from cradle.gateway.sse import StreamAccumulator
+    from cradle.normalize import canonicalize
+
+    s = _settings(tmp_path, api_key)
+    principal = Principal(tenant_id="t1", user_id="u1", key_id="k")
+    req = ChatRequest(model="m", stream=True, messages=[ChatMessage(role="user", content="fin")])
+    canonical = canonicalize(req, principal, s, backend_namespace="ns")
+    compressed = compress(req.messages, s, "m")
+    flight = Flight("k:s")
+
+    class _RT:
+        settings = s
+        flights = {"k:s": flight}
+        l1 = None
+        qdrant = None
+
+    rt = _RT()
+
+    class _Resp:
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}'
+            yield 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}'
+
+        async def aclose(self):
+            pass
+
+    ctx = RequestContext(request_id="r", principal=principal)
+    ctx.canonical = canonical
+    ctx.layer_hit = "miss"
+    ctx.flight = flight
+    acc = StreamAccumulator(outbound_id="o", outbound_created=1, model="m")
+
+    gen = st._wrap_stream(rt, req, ctx, None, compressed, _Resp(), acc)
+    # Pull frames until the finish frame is the one just yielded (it carries
+    # finish_reason). At that point completion_out is already set and the finish frame
+    # is already published to followers — this is exactly the disconnect window.
+    saw_finish = False
+    while not saw_finish:
+        frame = await gen.__anext__()
+        if b'"finish_reason": "stop"' in frame or b'"finish_reason":"stop"' in frame:
+            saw_finish = True
+    # Disconnect right here, at the finish yield.
+    await gen.aclose()
+
+    assert flight.done.is_set(), "flight must resolve"
+    assert flight.error is None, "a disconnect at the finish yield must NOT fail the flight"
+    assert flight.completion is not None, "the flight resolves as success (#76-A)"
+    assert rt.flights == {}
+
+
+@pytest.mark.asyncio
 async def test_reaper_clears_an_unstarted_leaked_generator(tmp_path, api_key):
     """#67: an UNSTARTED _wrap_stream generator (Starlette cancels the response before
     it ever pulls a frame) never runs its finally, so the registered flight leaks —
@@ -302,38 +365,74 @@ async def test_reaper_clears_an_unstarted_leaked_generator(tmp_path, api_key):
 
     rt = _RT()
 
+    closed = []
+
     class _Resp:
+        headers = {}
+
         async def aiter_lines(self):
             yield ""  # never reached — the generator is never started
 
         async def aclose(self):
-            pass
+            closed.append(True)  # #77: the reaper must close the leaked resp
 
+    resp = _Resp()
     ctx = RequestContext(request_id="r", principal=principal)
     ctx.layer_hit = "miss"
     ctx.flight = flight
+    flight.upstream_resp = resp  # stashed at the _miss_stream seam in production
 
     # Construct the generator but NEVER iterate it: its finally will never run.
-    gen = st._wrap_stream(rt, req, ctx, None, compressed, _Resp(),
+    gen = st._wrap_stream(rt, req, ctx, None, compressed, resp,
                           StreamAccumulator(outbound_id="o", outbound_created=1, model="m"))
 
     timeout_s = s.upstream.timeout_s
     # A fresh flight is not yet stale: the reaper must leave it alone.
-    assert reap_stale_flights(rt, timeout_s) == 0
+    assert await reap_stale_flights(rt, timeout_s) == 0
     assert rt.flights == {"k:s": flight}
     assert not flight.done.is_set()
 
     # Age it past the staleness bound (the leaked generator never publishes, so in
     # production last_progress_at simply never advances; here we backdate it).
     flight.last_progress_at -= timeout_s + 1
-    reaped = reap_stale_flights(rt, timeout_s)
+    reaped = await reap_stale_flights(rt, timeout_s)
 
     assert reaped == 1
     assert flight.done.is_set(), "reaper must resolve the leaked flight so followers wake"
     assert flight.error is not None, "reaped flight fails (not finishes) so followers get an error"
     assert rt.flights == {}, "reaper must evict the leaked slot so the key is no longer poisoned"
+    assert closed == [True], "#77: reaper must close the leaked upstream response"
 
     await gen.aclose()  # tidy the never-started generator
+
+
+@pytest.mark.asyncio
+async def test_reaper_survives_a_failing_upstream_close(tmp_path, api_key):
+    """#77: if closing a leaked upstream response raises, the reaper still reaps the
+    flight and returns its count — the close is best-effort (logged, not fatal)."""
+    from cradle.gateway.flight import Flight, reap_stale_flights
+
+    s = _settings(tmp_path, api_key)
+    timeout_s = s.upstream.timeout_s
+
+    class _BadResp:
+        async def aclose(self):
+            raise RuntimeError("connection reset during close")
+
+    flight = Flight("k:s")
+    flight.upstream_resp = _BadResp()
+    flight.last_progress_at -= timeout_s + 1  # stale, zero frames → reapable
+
+    class _RT:
+        settings = s
+        flights = {"k:s": flight}
+
+    rt = _RT()
+    reaped = await reap_stale_flights(rt, timeout_s)
+
+    assert reaped == 1, "a failing aclose must not stop the reap"
+    assert rt.flights == {}, "the flight is still evicted despite the close failure"
+    assert flight.done.is_set()
 
 
 def test_resolution_is_idempotent_first_wins(tmp_path, api_key):
@@ -357,6 +456,40 @@ def test_resolution_is_idempotent_first_wins(tmp_path, api_key):
     g.fail({"error": {"message": "late abort", "type": "server_error"}})
     assert g.completion is not None, "a late fail must not clobber a successful completion"
     assert g.error is None, "a late fail must not set an error on a finished flight"
+
+
+@pytest.mark.asyncio
+async def test_reaper_never_reaps_a_live_leader(tmp_path, api_key):
+    """#76: the reaper must NOT reap a live-but-quiet leader. A started stream leader
+    has published at least the role frame (frames non-empty), so a backpressured or
+    hung-writeback stream leader is never reaped; and a JSON flight (key :j) is never
+    reaped at all (its _miss try/finally always resolves it). Only a zero-frame stream
+    flight (an unstarted-generator leak) qualifies."""
+    from cradle.gateway.flight import Flight, reap_stale_flights
+
+    s = _settings(tmp_path, api_key)
+    timeout_s = s.upstream.timeout_s
+
+    # A stream leader that has published frames (alive, just quiet), aged past stale.
+    live_stream = Flight("k:s")
+    live_stream.publish(b"data: role\n\n")  # a started leader always publishes first
+    live_stream.last_progress_at -= timeout_s + 1
+
+    # A JSON leader aged past stale (its slow chat() is bounded by _miss's finally).
+    json_flight = Flight("k:j")
+    json_flight.last_progress_at -= timeout_s + 1
+
+    class _RT:
+        settings = s
+        flights = {"k:s": live_stream, "k:j": json_flight}
+
+    rt = _RT()
+    reaped = await reap_stale_flights(rt, timeout_s)
+
+    assert reaped == 0, "neither a frame-bearing stream leader nor a JSON leader is reapable"
+    assert rt.flights == {"k:s": live_stream, "k:j": json_flight}
+    assert not live_stream.done.is_set(), "a live stream leader must not be failed"
+    assert not json_flight.done.is_set(), "a JSON leader must not be reaped"
 
 
 @pytest.mark.asyncio

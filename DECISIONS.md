@@ -424,11 +424,16 @@ follower's timeout is a per-frame progress deadline (`asyncio.wait_for` around e
 downstream `yield` outside it so a slow follower client cannot trip its own deadline) rather than a
 total-duration bound. The follow-up gaps from the same review have since been worked: **#67** (an unstarted
 `_wrap_stream` generator leaks its flight on a client disconnect during `response.start`) is closed by a
-background reaper that sweeps `runtime.flights` for a stale-and-not-done leak every `upstream.timeout_s` while
-the flag is on; **#68** was split per defect — **#70** (post-finish writeback failure corrupting an
-already-served response), **#72** (double-wrapped follower error frame + dict-in-message), and **#73** (JSON
-followers losing the leader's upstream status/backoff headers) are fixed; **#71** (the follow-check/register
-burst race) is **accepted as a known limitation** (see below). The soak gate stands regardless: the failure
+background reaper that sweeps `runtime.flights` every `upstream.timeout_s` while the flag is on, narrowed
+(#76) to reap **only a zero-frame stream flight** — the sole real leak shape, since a started stream leader
+has published frames and a JSON leader always resolves in its own `finally`, so the reaper never fails a live
+leader — and closing that leak's orphaned upstream response (#77); **#68** was split per defect — **#70**
+(post-finish writeback failure corrupting an already-served response), **#72** (double-wrapped follower error
+frame + dict-in-message), and **#73** (JSON followers losing the leader's upstream status/backoff headers) are
+fixed; **#71** (the follow-check/register burst race) is **accepted as a known limitation** (see below);
+**#76**/**#77** (the reaper-liveness, finish-window and leaked-response defects a codex review found in the
+above work) are fixed, and **#78** (a register-seam orphan-follower delay, pre-existing to #57) is a tracked
+follow-up. The soak gate stands regardless: the failure
 mode of a leaked flight is uniquely bad (a hung request), so default-on waits on the soak evidence above even
 now that these bugs are closed.
 
