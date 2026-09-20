@@ -288,8 +288,16 @@ async def _wrap_stream(runtime, req, ctx, vec, compressed, resp, acc: StreamAccu
             piece = parse_and_accumulate(line, acc)
             if acc.error:
                 abort_reason = "upstream_error"
-                abort_body = {"error": {"message": acc.error_payload or "upstream error",
-                                        "type": "server_error", "code": "upstream_error"}}
+                # acc.error_payload is the upstream error OBJECT ({message,type,code,...}),
+                # so wrap it once as {"error": <obj>} (#72) — the old code put the whole
+                # dict into the string "message" field. This abort_body becomes
+                # flight.error and is served to both follower paths verbatim.
+                abort_body = (
+                    {"error": acc.error_payload}
+                    if acc.error_payload
+                    else {"error": {"message": "upstream error",
+                                    "type": "server_error", "code": "upstream_error"}}
+                )
                 yield encode_chunk(error_frame(acc.error_payload or "upstream error"))
                 yield encode_done()
                 return

@@ -85,6 +85,22 @@ def _settings(tmp_path, api_key: str, singleflight: bool = True) -> Settings:
     )
 
 
+def _parse_error_frame(sse_text: str) -> dict:
+    """Return the JSON of the single error `data:` frame in an SSE stream (not
+    [DONE]). Lets a test assert the error frame's SHAPE, not just a substring —
+    the substring check `"error" in text` passes on a double-wrapped frame (#72)."""
+    for line in sse_text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: "):].strip()
+        if payload == "[DONE]":
+            continue
+        obj = json.loads(payload)
+        if isinstance(obj, dict) and "error" in obj:
+            return obj
+    raise AssertionError(f"no error frame found in SSE stream: {sse_text!r}")
+
+
 @asynccontextmanager
 async def _driver(tmp_path, api_key, singleflight=True):
     up = GatedUpstream()
@@ -269,8 +285,16 @@ async def test_follower_of_aborted_leader_gets_error_frame(tmp_path, api_key):
     chunks = [c async for c in gen]
     await abort
     text = b"".join(chunks).decode()
-    assert "error" in text.lower()
     assert "data: [DONE]" in text
+    # #72: the follower's error frame must be the leader's error object as-is,
+    # NOT double-wrapped. flight.error is {"error": {...}}; the old code passed it
+    # through error_frame() → {"error": {"error": {...}}}. Assert the parsed shape:
+    # exactly one "error" level whose value is the leader's inner error dict.
+    err = _parse_error_frame(text)
+    assert set(err) == {"error"}, f"expected a single top-level 'error' key, got {err}"
+    inner = err["error"]
+    assert "error" not in inner, f"error frame is double-wrapped: {err}"
+    assert inner.get("message") == "leader aborted"
     assert flight.followers == 0, "follower decremented its count in finally"
 
 
@@ -474,6 +498,61 @@ async def test_upstream_error_propagates_to_followers(tmp_path, api_key):
 
     assert up.calls == 1
     assert all(r.status_code == 502 for r in resps), [r.status_code for r in resps]
+    assert app.state.runtime.flights == {}
+
+
+@pytest.mark.asyncio
+async def test_stream_leader_midstream_error_gives_followers_clean_message(tmp_path, api_key):
+    """#72 Defect B: a wrap-stream leader whose upstream emits an error frame
+    MID-STREAM (HTTP 200 body carrying `data: {"error": {...}}`) must give its
+    followers an error whose `message` is the upstream text, not the whole error
+    dict stuffed into the string message field. Distinct from the #63 open-failure
+    path (HTTP 500 at open) — this asserts the upstream's `"boom"` reached the
+    follower, which proves the acc.error branch (stream.py) ran, not the open path."""
+    async with _driver(tmp_path, api_key) as (up, app, client):
+        auth = _auth(api_key)
+
+        async def stream_err_handler(request: httpx.Request) -> httpx.Response:
+            up.calls += 1
+            await up.release.wait()
+
+            def gen() -> Iterator[bytes]:
+                # A valid role frame, then an upstream error frame mid-stream.
+                role = {"id": "up-1", "created": 1, "model": "m",
+                        "choices": [{"index": 0, "delta": {"role": "assistant"},
+                                     "finish_reason": None}]}
+                yield f"data: {json.dumps(role)}\n\n".encode()
+                yield b'data: {"error": {"message": "boom", "type": "server_error", "code": "upstream_error"}}\n\n'
+
+            return httpx.Response(200, content=b"".join(gen()),
+                                  headers={"content-type": "text/event-stream"})
+
+        app.state.runtime.http = httpx.AsyncClient(
+            transport=httpx.MockTransport(stream_err_handler), base_url="http://upstream"
+        )
+        N = 3
+        tasks = [
+            asyncio.ensure_future(
+                client.post("/v1/chat/completions", headers=auth, json=_body("boom", stream=True))
+            )
+            for _ in range(N)
+        ]
+        await _wait_for_followers(app, N - 1)
+        up.release.set()
+        resps = await asyncio.gather(*tasks)
+        await app.state.runtime.http.aclose()
+
+    assert up.calls == 1
+    # Every response is a follower or the leader; each carries an error frame whose
+    # message is the upstream string, exactly one error level (Defect A also holds).
+    for r in resps:
+        err = _parse_error_frame(r.text)
+        assert set(err) == {"error"}, f"expected single top-level error, got {err}"
+        inner = err["error"]
+        assert "error" not in inner, f"double-wrapped error frame: {err}"
+        assert inner.get("message") == "boom", (
+            f"message must be the upstream string, not a nested dict: {inner!r}"
+        )
     assert app.state.runtime.flights == {}
 
 
