@@ -266,6 +266,9 @@ the client's when `pass_through_client_auth: true` (default), else Cradle's
 `/v1/models`). They do **not** enter the cache key, and a cache hit or single-flight
 follower sends nothing upstream — an upstream that tracks sessions only sees misses.
 If a backend "lost the session id", check it was a miss (`X-Cradle-Cache: miss`).
+Body-level identifiers (`session_id`, `chat_id`, `metadata`, `store`, plus the provider
+hints `prompt_cache_key`/`prompt_cache_retention`/`safety_identifier`) are likewise
+forwarded but kept **out of the cache key** (#82), so the same prompt in two chats still hits.
 
 ---
 

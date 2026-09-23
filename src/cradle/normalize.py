@@ -11,22 +11,29 @@ from cradle.config import Settings
 from cradle.gateway.models import ChatMessage, ChatRequest
 
 # Bumped to 2: cache identity now includes the resolved backend namespace and
-# excludes routing-only hints (see cache_namespace + _ROUTING_HINTS). Old L1/L2
+# excludes routing-only hints (see cache_namespace + _NON_SEMANTIC_FIELDS). Old L1/L2
 # entries written under schema 1 miss safely and age out on TTL.
-HASH_SCHEMA_VERSION = 2
+# Bumped to 3 (#82): session/chat identifiers and stored-completion tags left the key.
+HASH_SCHEMA_VERSION = 3
 _KNOWN_REQUEST = set(ChatRequest.model_fields)
 _KNOWN_MESSAGE = set(ChatMessage.model_fields)
 
-# Undeclared request fields that steer PROVIDER-side caching/routing/abuse
-# monitoring but do not change the generated answer. They must not enter the
-# cache key, or two identical prompts differing only by a hint split into
-# separate L1 entries (bug B). Same rationale as excluding `stream`. The
-# declared `user` field is already dropped (never carried into the canonical
-# form), so it is not listed here.
-_ROUTING_HINTS = frozenset({
+# Undeclared request fields that identify or tag a request but do not change the
+# generated answer: provider-side caching/routing/abuse hints, per-session/chat
+# identifiers (#82), and OpenAI stored-completion tags. They are still forwarded
+# upstream but must not enter the cache key, or two identical prompts differing
+# only by one of them split into separate entries (bug B; #82 — a per-chat id made
+# every chat its own cache). Same rationale as excluding `stream`. The declared
+# `user` field is already dropped (never carried into the canonical form), so it
+# is not listed here. Unknown vendor extras (`top_k`, `min_p`, ...) stay in the key.
+_NON_SEMANTIC_FIELDS = frozenset({
     "prompt_cache_key",
     "prompt_cache_retention",
     "safety_identifier",
+    "session_id",
+    "chat_id",
+    "metadata",
+    "store",
 })
 
 
@@ -189,7 +196,7 @@ def canonicalize(
     extras = {
         k: _sort_json(v)
         for k, v in (req.model_extra or {}).items()
-        if k not in _KNOWN_REQUEST and k not in _ROUTING_HINTS
+        if k not in _KNOWN_REQUEST and k not in _NON_SEMANTIC_FIELDS
     }
     tools = _empty_to_none(_sort_json(req.tools))
     tool_choice = _empty_to_none(_sort_json(req.tool_choice))

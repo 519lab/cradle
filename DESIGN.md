@@ -614,10 +614,10 @@ Upstream fallback when pass-through is off or the client sent no Bearer: `CRADLE
 
 ### Hash input schema (L1) — contract
 
-Closed allowlist of generation-affecting fields, plus a sorted dump of remaining extras. `stream` is **not** hashed (one stored JSON serves JSON and synthesized SSE). `user` (client hint) is **not** hashed. `stream_options` is **not** hashed (replay honors the **current** request’s `include_usage`).
+Closed allowlist of generation-affecting fields, plus a sorted dump of remaining extras. `stream` is **not** hashed (one stored JSON serves JSON and synthesized SSE). `user` (client hint) is **not** hashed. `stream_options` is **not** hashed (replay honors the **current** request’s `include_usage`). Non-semantic extras (`normalize._NON_SEMANTIC_FIELDS`: `prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`, `session_id`, `chat_id`, `metadata`, `store`) are forwarded upstream but **not** hashed, so a per-session/chat id never splits the cache (#82); every other extra (`top_k`, `min_p`, …) is.
 
 ```python
-HASH_SCHEMA_VERSION = 1
+HASH_SCHEMA_VERSION = 3  # 2: backend namespace + routing hints; 3: session fields (#82)
 
 EMPTY_AS_NONE = ("tools", "logit_bias")          # None and []/{} → None
 EMPTY_DICT_AS_NONE = ("tool_choice",)
