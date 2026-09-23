@@ -487,12 +487,21 @@ Forward **every** client request header except a fixed **denylist** (`upstream/o
 
 - hop-by-hop (RFC 9110 §7.6.1: `connection`, `keep-alive`, `proxy-connection`, `te`, `trailer`,
   `transfer-encoding`, `upgrade`, plus any header named in `Connection`);
-- headers describing the client→Cradle hop, not Cradle's re-serialized/compressed body: `host`,
-  `content-length`, `content-type`, `expect`; and `accept-encoding` (httpx advertises only encodings it
-  can decode — a relayed `zstd`/`br` could return a body Cradle cannot parse);
+- headers describing the client→Cradle hop or the client's original body bytes, not Cradle's
+  re-serialized/compressed body: `host`, `content-length`, `content-type`, `expect`, and the body
+  digests `content-md5`/`digest`/`content-digest`/`repr-digest` (stale against the rewritten body);
+  and `accept-encoding` (httpx advertises only encodings it can decode — a relayed `zstd`/`br` could
+  return a body Cradle cannot parse);
 - credentials/control not meant for the upstream: `proxy-authorization`, Cradle's own `x-cradle-*`;
 - `authorization` is excluded from the generic relay and decided by the existing
-  `pass_through_client_auth` rule, so a Cradle key in keyed mode never leaks upstream.
+  `pass_through_client_auth` rule, so a Cradle key in keyed mode never leaks upstream. When it is
+  forwarded, it is the **first** occurrence — the same one tenancy authenticated — so a request with
+  two `Authorization` headers can never be checked with one credential and forwarded with another.
+
+Headers travel as the raw ASGI `(bytes, bytes)` list end to end, never a `str` dict: a dict keeps only
+the last of a repeated header (multiple `Cookie`s were silently dropped), and `str` values make httpx
+re-encode as ASCII, so a UTF-8 value such as `X-OpenWebUI-User-Name: José` crashed every miss with a bare
+500. Both were caught in review of this change and are pinned by regression tests.
 
 An allowlist was rejected: it forces a Cradle change for every new application header, which is exactly
 the impedance this gateway must not add.
@@ -504,4 +513,8 @@ Headers stay **out of the cache key** — they are transport metadata; a header 
 would share an entry with its absent twin (accepted: no such header is known on OpenAI-compatible
 backends, and keying on headers would fragment the cache on per-request noise like `traceparent`). A cache
 hit or single-flight follower sends nothing upstream, so its headers are never seen there — inherent to
-caching. The response direction (`forwardable_headers`) remains an allowlist; that is a separate decision.
+caching. `Cookie` is forwarded too (cross-origin, to the upstream): deliberate — session-affinity cookies
+are exactly the application state this ADR protects; a deployment that must not relay cookies strips them
+at a reverse proxy in front. An L2 audit re-ask reuses the original request's headers, including a
+streaming client's `Accept: text/event-stream`, on a non-stream call; backends key streaming on the body's
+`stream`, so this is accepted. The response direction (`forwardable_headers`) remains an allowlist; that is a separate decision.

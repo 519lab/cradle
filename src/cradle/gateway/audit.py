@@ -165,7 +165,7 @@ async def run_audit(
 
     try:
         fresh_completion = await chat(
-            runtime.http, target, payload, client_headers=ctx.headers
+            runtime.http, target, payload, client_headers=ctx.client_headers
         )
         fresh = merge(fresh_completion, compressed.template)
         # The same write-quality gate as the miss path (issue #24): an empty,

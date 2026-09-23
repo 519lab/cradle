@@ -76,7 +76,7 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
     t0 = time.perf_counter()
     try:
         resp = await start_chat_stream(
-            runtime.http, target, payload, client_headers=ctx.headers
+            runtime.http, target, payload, client_headers=ctx.client_headers
         )
     except UpstreamError as exc:
         # #63: the flight is registered (ctx.flight) but _wrap_stream — the only place

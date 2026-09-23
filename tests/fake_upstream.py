@@ -9,6 +9,7 @@ fake_app = FastAPI()
 last_authorization: str | None = None
 last_payload: dict | None = None  # side channel: the last forwarded request body
 last_headers: dict[str, str] = {}  # side channel: the last forwarded request headers
+last_raw_headers: list[tuple[bytes, bytes]] = []  # same, raw (repeats kept)
 
 
 def _reply_from(body: dict) -> str:
@@ -21,9 +22,10 @@ def _reply_from(body: dict) -> str:
 
 @fake_app.post("/v1/chat/completions")
 async def completions(request: Request):
-    global last_authorization, last_payload, last_headers
+    global last_authorization, last_payload, last_headers, last_raw_headers
     last_authorization = request.headers.get("authorization")
     last_headers = dict(request.headers.items())
+    last_raw_headers = list(request.headers.raw)
     body = await request.json()
     last_payload = body
     model = body.get("model") or "fake"

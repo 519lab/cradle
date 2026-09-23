@@ -259,8 +259,11 @@ only the configured tokens authenticate.
 Every client request header reaches the upstream **except** a fixed denylist: hop-by-hop
 (`connection`, `keep-alive`, `proxy-connection`, `te`, `trailer`, `transfer-encoding`,
 `upgrade`, and any header named in `Connection`), `host`, `content-length`, `content-type`,
-`accept-encoding`, `expect`, `proxy-authorization`, and `x-cradle-*`. `authorization` is
-the client's when `pass_through_client_auth: true` (default), else Cradle's
+`accept-encoding`, `expect`, body digests (`content-md5`, `digest`, `content-digest`,
+`repr-digest`), `proxy-authorization`, and `x-cradle-*`. Values are relayed byte-exact
+(UTF-8 display names are fine) and repeated headers (several `Cookie`s) all pass; `Cookie`
+is forwarded — strip it at a reverse proxy if the upstream must not see it. `authorization` is
+the client's (first occurrence — the one Cradle authenticated) when `pass_through_client_auth: true` (default), else Cradle's
 `upstream.api_key_env` key. So `X-Session-Id`, `X-OpenWebUI-Chat-Id`/`-User-Id`,
 `traceparent`, etc. pass through on every upstream call (JSON miss, streams, L2 audit,
 `/v1/models`). They do **not** enter the cache key, and a cache hit or single-flight

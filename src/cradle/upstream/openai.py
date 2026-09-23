@@ -38,31 +38,43 @@ def forwardable_headers(headers: Any) -> dict[str, str]:
 # Request direction (#81) is the opposite policy: a DENYLIST, so any header an
 # application sends (session/chat ids, tracing, vendor routing) reaches the
 # upstream without Cradle knowing about it. Stripped are only headers that are
-# hop-by-hop (RFC 9110 §7.6.1), that describe the client→Cradle hop rather than
-# Cradle's re-serialized body, or that are credentials/control not meant for the
-# upstream. `authorization` is decided separately by `_headers` (a Cradle key in
-# keyed mode must never leak); `accept-encoding` is left to httpx, which only
-# advertises encodings it can decode.
+# hop-by-hop (RFC 9110 §7.6.1), that describe the client→Cradle hop or the
+# client's original body bytes rather than Cradle's re-serialized body, or that
+# are credentials/control not meant for the upstream. `authorization` is decided
+# separately by `_headers` (a Cradle key in keyed mode must never leak);
+# `accept-encoding` is left to httpx, which only advertises encodings it can decode.
+#
+# Headers travel as the raw ASGI (bytes, bytes) list, never a str dict: a dict
+# keeps only the last of a repeated header (multiple `cookie`s, or two
+# `authorization`s where the forwarded one would differ from the one Cradle
+# authenticated), and str values make httpx re-encode as ASCII, so a non-ASCII
+# value (`X-OpenWebUI-User-Name: José`) crashed the request.
+RawHeaders = list[tuple[bytes, bytes]]
+
 _HOP_BY_HOP = frozenset({
-    "connection", "keep-alive", "proxy-connection", "te", "trailer",
-    "transfer-encoding", "upgrade",
+    b"connection", b"keep-alive", b"proxy-connection", b"te", b"trailer",
+    b"transfer-encoding", b"upgrade",
 })
 _CRADLE_OWNED = frozenset({
-    "host", "content-length", "content-type", "accept-encoding", "expect",
-    "authorization", "proxy-authorization",
+    b"host", b"content-length", b"content-type", b"accept-encoding", b"expect",
+    b"content-md5", b"digest", b"content-digest", b"repr-digest",
+    b"authorization", b"proxy-authorization",
 })
-_CRADLE_CONTROL_PREFIX = "x-cradle-"
+_CRADLE_CONTROL_PREFIX = b"x-cradle-"
 
 
-def forward_request_headers(headers: Any) -> dict[str, str]:
-    """Client request headers to relay upstream: everything except the denylist."""
+def forward_request_headers(raw: RawHeaders) -> RawHeaders:
+    """Client request headers to relay upstream: everything except the denylist.
+
+    Order and repeats are preserved; values pass through as the client's bytes.
+    """
     named_by_connection = {
         token.strip().lower()
-        for value in _values(headers, "connection")
-        for token in value.split(",")
+        for value in _values(raw, b"connection")
+        for token in value.split(b",")
     }
-    out: dict[str, str] = {}
-    for name, value in headers.items():
+    out: RawHeaders = []
+    for name, value in raw:
         low = name.lower()
         if (
             low in _HOP_BY_HOP
@@ -71,12 +83,12 @@ def forward_request_headers(headers: Any) -> dict[str, str]:
             or low.startswith(_CRADLE_CONTROL_PREFIX)
         ):
             continue
-        out[low] = value
+        out.append((low, value))
     return out
 
 
-def _values(headers: Any, name: str) -> list[str]:
-    return [v for k, v in headers.items() if k.lower() == name]
+def _values(raw: RawHeaders, name: bytes) -> list[bytes]:
+    return [v for k, v in raw if k.lower() == name]
 
 
 class UpstreamError(Exception):
@@ -92,17 +104,20 @@ def _url(upstream: UpstreamSettings, path: str) -> str:
     return upstream.base_url.rstrip("/") + path
 
 
-def _headers(upstream: UpstreamSettings, client_headers: Any = None) -> dict[str, str]:
-    client_headers = client_headers or {}
+def _headers(upstream: UpstreamSettings, client_headers: RawHeaders | None = None) -> RawHeaders:
+    client_headers = client_headers or []
     headers = forward_request_headers(client_headers)
-    headers["content-type"] = "application/json"
-    client_authorization = next(iter(_values(client_headers, "authorization")), None)
+    headers.append((b"content-type", b"application/json"))
+    # The FIRST authorization, the same occurrence tenancy authenticated
+    # (Starlette `Headers.get` returns the first), so the credential Cradle
+    # checked and the one it forwards can never differ.
+    client_authorization = next(iter(_values(client_headers, b"authorization")), None)
     if upstream.pass_through_client_auth and client_authorization:
-        headers["authorization"] = client_authorization
+        headers.append((b"authorization", client_authorization))
         return headers
     key = os.environ.get(upstream.api_key_env, "")
     if key:
-        headers["authorization"] = f"Bearer {key}"
+        headers.append((b"authorization", f"Bearer {key}".encode()))
     return headers
 
 
@@ -117,7 +132,7 @@ async def chat(
     client: httpx.AsyncClient,
     upstream: UpstreamSettings,
     payload: dict[str, Any],
-    client_headers: Any = None,
+    client_headers: RawHeaders | None = None,
 ) -> dict[str, Any]:
     body = dict(payload)
     body.pop("stream", None)
@@ -146,7 +161,7 @@ async def start_chat_stream(
     client: httpx.AsyncClient,
     upstream: UpstreamSettings,
     payload: dict[str, Any],
-    client_headers: Any = None,
+    client_headers: RawHeaders | None = None,
 ) -> httpx.Response:
     body = dict(payload)
     body["stream"] = True
@@ -196,7 +211,7 @@ def _single_fallback_backend(settings: Settings) -> bool:
 async def list_models(
     client: httpx.AsyncClient,
     settings: Settings,
-    client_headers: Any = None,
+    client_headers: RawHeaders | None = None,
 ) -> dict[str, Any]:
     # Passthrough when explicitly requested, OR automatically in single-backend
     # (fallback-only) deployments so /v1/models reflects the real upstream model.

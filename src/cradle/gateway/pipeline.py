@@ -414,7 +414,7 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
         t0 = time.perf_counter()
         try:
             completion = await chat(
-                runtime.http, target, payload, client_headers=ctx.headers
+                runtime.http, target, payload, client_headers=ctx.client_headers
             )
         except UpstreamError as exc:
             # Remember it so the flight finally can hand followers the leader's REAL
