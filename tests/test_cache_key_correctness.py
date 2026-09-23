@@ -11,7 +11,7 @@ from __future__ import annotations
 from cradle.cache.records import Principal
 from cradle.config import Settings
 from cradle.gateway.models import ChatRequest
-from cradle.normalize import cache_namespace, canonicalize, l1_key
+from cradle.normalize import cache_namespace, canonicalize, l1_key, sampling_fingerprint
 
 P = Principal(tenant_id="t", user_id="u", key_id="k")
 S = Settings()
@@ -58,6 +58,36 @@ def test_multiple_routing_hints_ignored() -> None:
         P, S,
     ))
     assert base == hinted
+
+
+# --- #82: session/chat identifiers and stored-completion tags excluded ------
+_SESSION_FIELDS = {
+    "session_id": "sess-1",
+    "chat_id": "chat-1",
+    "metadata": {"session_id": "meta-1"},
+    "store": True,
+}
+
+
+def test_session_fields_do_not_split_l1_or_l2() -> None:
+    base = canonicalize(_req(), P, S)
+    for name, value in _SESSION_FIELDS.items():
+        tagged = canonicalize(_req(**{name: value}), P, S)
+        assert l1_key(base) == l1_key(tagged), name
+        assert sampling_fingerprint(base) == sampling_fingerprint(tagged), name
+
+
+def test_two_sessions_share_one_key() -> None:
+    a = l1_key(canonicalize(_req(session_id="a", chat_id="c1", metadata={"x": 1}), P, S))
+    b = l1_key(canonicalize(_req(session_id="b", chat_id="c2", metadata={"x": 2}), P, S))
+    assert a == b
+
+
+def test_vendor_sampling_extra_still_splits_with_session_fields() -> None:
+    base = canonicalize(_req(session_id="s"), P, S)
+    top_k = canonicalize(_req(session_id="s", top_k=40), P, S)
+    assert l1_key(base) != l1_key(top_k)
+    assert sampling_fingerprint(base) != sampling_fingerprint(top_k)
 
 
 def test_real_param_still_splits() -> None:

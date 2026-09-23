@@ -41,7 +41,9 @@ class RequestContext:
     t_compress_s: float = 0.0
     t_upstream_s: float = 0.0
     t_reconstruct_s: float = 0.0
-    headers: dict[str, str] = field(default_factory=dict)
+    # Raw client request headers (ASGI bytes pairs, repeats kept) relayed upstream
+    # minus the denylist in upstream/openai.py (#81).
+    client_headers: list[tuple[bytes, bytes]] = field(default_factory=list)
     upstream_name: str = "default"
     # Per-request cache directives (enhancement #2), parsed from
     # X-Cradle-Cache-Control (no-store / no-cache / refresh) and X-Cradle-Cache-TTL.

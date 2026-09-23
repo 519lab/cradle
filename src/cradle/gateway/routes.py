@@ -62,8 +62,7 @@ async def models(request: Request):
     result = await authenticate(request, rt.settings, rt.principals)
     if isinstance(result, JSONResponse):
         return result
-    auth = request.headers.get("authorization")
-    return await list_models(rt.http, rt.settings, authorization=auth)
+    return await list_models(rt.http, rt.settings, client_headers=list(request.headers.raw))
 
 
 @router.post("/v1/chat/completions")
@@ -90,7 +89,8 @@ async def chat_completions(request: Request):
     ctx = RequestContext(
         request_id=str(uuid.uuid4()),
         principal=principal,
-        headers={"authorization": request.headers.get("authorization") or ""},
+        # All client headers, raw; the upstream layer strips its denylist (#81).
+        client_headers=list(request.headers.raw),
     )
     _apply_cache_directives(ctx, request, rt.settings.cache.ttl_s)
     return await handle_chat(rt, body, ctx)

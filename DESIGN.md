@@ -142,7 +142,7 @@ flowchart TB
 
 ### 2. Request pipeline (sequence of functions, not a ProxyService)
 
-`cradle/gateway/pipeline.py` is a **sequencer** — `handle_chat`, the L1/L2/miss dispatch, `_replay`, and the JSON miss path — not a god module. Each step lives in its own module: the streaming miss paths (bypass tee, #43 passthrough-cache, wrap) are in `cradle/gateway/stream.py`, and the response/observability leaf helpers (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`, `_client_auth`) — shared by the JSON and streaming paths — are in `cradle/gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Every module stays ≤ 600 lines.
+`cradle/gateway/pipeline.py` is a **sequencer** — `handle_chat`, the L1/L2/miss dispatch, `_replay`, and the JSON miss path — not a god module. Each step lives in its own module: the streaming miss paths (bypass tee, #43 passthrough-cache, wrap) are in `cradle/gateway/stream.py`, and the response/observability leaf helpers (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`) — shared by the JSON and streaming paths — are in `cradle/gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Every module stays ≤ 600 lines.
 
 Non-stream miss: compress → upstream JSON → wrap merge → writeback → respond.
 
@@ -602,6 +602,8 @@ bodies pass through verbatim (real message/type/code), with `retry-after` /
 
 **Default (intercept):** `auth.keys: []`. Cradle does not issue keys. Clients keep their provider `Authorization`; it is forwarded upstream (`pass_through_client_auth: true`). Cache tenant/user is `sha256(bearer)` (or `anon` if the header is missing). No `X-User-Id`. The request body `user` field is **not** hashed.
 
+**Request headers (#81):** every client request header is forwarded upstream by default — a **denylist**, not an allowlist, so Cradle never impedes an application's own headers (session/chat ids such as `X-Session-Id` / `X-OpenWebUI-Chat-Id`, tracing, vendor routing). Stripped: hop-by-hop headers (RFC 9110 §7.6.1 plus any named in `Connection`), `host`, `content-length`, `content-type` (Cradle re-serializes the body as JSON), body digests (`content-md5`/`digest`/`content-digest`/`repr-digest`), `accept-encoding` (httpx advertises only what it can decode), `expect`, `proxy-authorization`, and Cradle's own `x-cradle-*` control headers. `authorization` follows `pass_through_client_auth` as above, so a Cradle key in keyed mode never leaks; the forwarded one is the first occurrence, the one tenancy authenticated. Headers travel as raw ASGI bytes pairs (repeats kept, values byte-exact). Headers are transport metadata: they are **not** part of the cache key, and on a cache hit or for a single-flight follower they never reach the upstream (`upstream/openai.py:forward_request_headers`, ADR-0009).
+
 **Optional allowlist:** if `auth.keys` is non-empty, unknown Bearers 401 (constant-time compare). Unset `token_env` for a listed key → refuse to start.
 
 Upstream fallback when pass-through is off or the client sent no Bearer: `CRADLE_UPSTREAM_API_KEY`.
@@ -612,10 +614,10 @@ Upstream fallback when pass-through is off or the client sent no Bearer: `CRADLE
 
 ### Hash input schema (L1) — contract
 
-Closed allowlist of generation-affecting fields, plus a sorted dump of remaining extras. `stream` is **not** hashed (one stored JSON serves JSON and synthesized SSE). `user` (client hint) is **not** hashed. `stream_options` is **not** hashed (replay honors the **current** request’s `include_usage`).
+Closed allowlist of generation-affecting fields, plus a sorted dump of remaining extras. `stream` is **not** hashed (one stored JSON serves JSON and synthesized SSE). `user` (client hint) is **not** hashed. `stream_options` is **not** hashed (replay honors the **current** request’s `include_usage`). Non-semantic extras (`normalize._NON_SEMANTIC_FIELDS`: `prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`, `session_id`, `chat_id`, `metadata`, `store`) are forwarded upstream but **not** hashed, so a per-session/chat id never splits the cache (#82); every other extra (`top_k`, `min_p`, …) is.
 
 ```python
-HASH_SCHEMA_VERSION = 1
+HASH_SCHEMA_VERSION = 3  # 2: backend namespace + routing hints; 3: session fields (#82)
 
 EMPTY_AS_NONE = ("tools", "logit_bias")          # None and []/{} → None
 EMPTY_DICT_AS_NONE = ("tool_choice",)
