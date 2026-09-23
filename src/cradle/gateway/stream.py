@@ -27,7 +27,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from cradle.gateway.context import RequestContext
 from cradle.gateway.flight import resolve_and_release
 from cradle.gateway.responses import (
-    _client_auth,
     _effective_ttl,
     _headers,
     _include_usage,
@@ -77,7 +76,7 @@ async def _miss_stream(runtime, req, ctx, vec, compressed, payload, target) -> J
     t0 = time.perf_counter()
     try:
         resp = await start_chat_stream(
-            runtime.http, target, payload, authorization=_client_auth(ctx)
+            runtime.http, target, payload, client_headers=ctx.headers
         )
     except UpstreamError as exc:
         # #63: the flight is registered (ctx.flight) but _wrap_stream — the only place

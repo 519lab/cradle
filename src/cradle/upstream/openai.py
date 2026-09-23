@@ -35,6 +35,50 @@ def forwardable_headers(headers: Any) -> dict[str, str]:
     return out
 
 
+# Request direction (#81) is the opposite policy: a DENYLIST, so any header an
+# application sends (session/chat ids, tracing, vendor routing) reaches the
+# upstream without Cradle knowing about it. Stripped are only headers that are
+# hop-by-hop (RFC 9110 §7.6.1), that describe the client→Cradle hop rather than
+# Cradle's re-serialized body, or that are credentials/control not meant for the
+# upstream. `authorization` is decided separately by `_headers` (a Cradle key in
+# keyed mode must never leak); `accept-encoding` is left to httpx, which only
+# advertises encodings it can decode.
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-connection", "te", "trailer",
+    "transfer-encoding", "upgrade",
+})
+_CRADLE_OWNED = frozenset({
+    "host", "content-length", "content-type", "accept-encoding", "expect",
+    "authorization", "proxy-authorization",
+})
+_CRADLE_CONTROL_PREFIX = "x-cradle-"
+
+
+def forward_request_headers(headers: Any) -> dict[str, str]:
+    """Client request headers to relay upstream: everything except the denylist."""
+    named_by_connection = {
+        token.strip().lower()
+        for value in _values(headers, "connection")
+        for token in value.split(",")
+    }
+    out: dict[str, str] = {}
+    for name, value in headers.items():
+        low = name.lower()
+        if (
+            low in _HOP_BY_HOP
+            or low in _CRADLE_OWNED
+            or low in named_by_connection
+            or low.startswith(_CRADLE_CONTROL_PREFIX)
+        ):
+            continue
+        out[low] = value
+    return out
+
+
+def _values(headers: Any, name: str) -> list[str]:
+    return [v for k, v in headers.items() if k.lower() == name]
+
+
 class UpstreamError(Exception):
     def __init__(self, status: int, body: Any, headers: dict[str, str] | None = None) -> None:
         super().__init__(f"upstream {status}")
@@ -48,8 +92,11 @@ def _url(upstream: UpstreamSettings, path: str) -> str:
     return upstream.base_url.rstrip("/") + path
 
 
-def _headers(upstream: UpstreamSettings, client_authorization: str | None = None) -> dict[str, str]:
-    headers = {"content-type": "application/json"}
+def _headers(upstream: UpstreamSettings, client_headers: Any = None) -> dict[str, str]:
+    client_headers = client_headers or {}
+    headers = forward_request_headers(client_headers)
+    headers["content-type"] = "application/json"
+    client_authorization = next(iter(_values(client_headers, "authorization")), None)
     if upstream.pass_through_client_auth and client_authorization:
         headers["authorization"] = client_authorization
         return headers
@@ -70,7 +117,7 @@ async def chat(
     client: httpx.AsyncClient,
     upstream: UpstreamSettings,
     payload: dict[str, Any],
-    authorization: str | None = None,
+    client_headers: Any = None,
 ) -> dict[str, Any]:
     body = dict(payload)
     body.pop("stream", None)
@@ -78,7 +125,7 @@ async def chat(
         resp = await client.post(
             _url(upstream, "/chat/completions"),
             json=body,
-            headers=_headers(upstream, authorization),
+            headers=_headers(upstream, client_headers),
             timeout=upstream.timeout_s,
         )
     except httpx.RequestError as exc:
@@ -99,7 +146,7 @@ async def start_chat_stream(
     client: httpx.AsyncClient,
     upstream: UpstreamSettings,
     payload: dict[str, Any],
-    authorization: str | None = None,
+    client_headers: Any = None,
 ) -> httpx.Response:
     body = dict(payload)
     body["stream"] = True
@@ -107,7 +154,7 @@ async def start_chat_stream(
         "POST",
         _url(upstream, "/chat/completions"),
         json=body,
-        headers=_headers(upstream, authorization),
+        headers=_headers(upstream, client_headers),
         timeout=upstream.timeout_s,
     )
     try:
@@ -149,7 +196,7 @@ def _single_fallback_backend(settings: Settings) -> bool:
 async def list_models(
     client: httpx.AsyncClient,
     settings: Settings,
-    authorization: str | None = None,
+    client_headers: Any = None,
 ) -> dict[str, Any]:
     # Passthrough when explicitly requested, OR automatically in single-backend
     # (fallback-only) deployments so /v1/models reflects the real upstream model.
@@ -159,7 +206,7 @@ async def list_models(
     try:
         resp = await client.get(
             _url(settings.upstream, "/models"),
-            headers=_headers(settings.upstream, authorization),
+            headers=_headers(settings.upstream, client_headers),
             timeout=settings.upstream.timeout_s,
         )
         resp.raise_for_status()

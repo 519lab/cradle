@@ -463,3 +463,45 @@ response header `X-Cradle-Flight: follower`, new metrics `cradle_flight_follower
 serves the leader's answer under the shared key, changing neither what caches nor how entries are read. The
 #43 tool-stream tee and bypass are structurally excluded (each client needs the raw upstream bytes /
 per-response headers); coalescing them is mechanically possible later but has no cache benefit.
+
+---
+
+## ADR-0009: Client request headers pass through by denylist, not allowlist
+
+**Date:** 2026-09-23
+**Status:** Accepted
+**Phase:** Correctness / transparency
+**Deciders:** Greg
+
+### Context
+
+Cradle rebuilt the upstream request headers from scratch (`content-type` + `authorization` only), so
+application headers — `X-Session-Id`, `X-OpenWebUI-Chat-Id`/`-User-Id`, `traceparent`, vendor routing
+hints — were silently dropped on every path (#81). Backends that use them for session affinity, KV/prompt
+reuse, logging or quota lost them. Cradle is a pass-through gateway: it must not impede the normal flow of
+any application talking through it.
+
+### Decision
+
+Forward **every** client request header except a fixed **denylist** (`upstream/openai.py:forward_request_headers`):
+
+- hop-by-hop (RFC 9110 §7.6.1: `connection`, `keep-alive`, `proxy-connection`, `te`, `trailer`,
+  `transfer-encoding`, `upgrade`, plus any header named in `Connection`);
+- headers describing the client→Cradle hop, not Cradle's re-serialized/compressed body: `host`,
+  `content-length`, `content-type`, `expect`; and `accept-encoding` (httpx advertises only encodings it
+  can decode — a relayed `zstd`/`br` could return a body Cradle cannot parse);
+- credentials/control not meant for the upstream: `proxy-authorization`, Cradle's own `x-cradle-*`;
+- `authorization` is excluded from the generic relay and decided by the existing
+  `pass_through_client_auth` rule, so a Cradle key in keyed mode never leaks upstream.
+
+An allowlist was rejected: it forces a Cradle change for every new application header, which is exactly
+the impedance this gateway must not add.
+
+### Consequences
+
+Headers apply on every upstream call (JSON miss, wrap/tool/bypass streams, L2 audit, `/v1/models`).
+Headers stay **out of the cache key** — they are transport metadata; a header that changed the answer
+would share an entry with its absent twin (accepted: no such header is known on OpenAI-compatible
+backends, and keying on headers would fragment the cache on per-request noise like `traceparent`). A cache
+hit or single-flight follower sends nothing upstream, so its headers are never seen there — inherent to
+caching. The response direction (`forwardable_headers`) remains an allowlist; that is a separate decision.

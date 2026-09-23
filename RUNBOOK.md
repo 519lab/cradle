@@ -254,6 +254,19 @@ only the configured tokens authenticate.
 | `X-Cradle-Flight` | `follower` — this request was coalesced onto an in-flight leader's upstream call (single-flight, #57). Present only when `cache.singleflight` is on; the request is a MISS that made no upstream call. If the leader's upstream **errored**, a JSON follower relays the leader's real status and backoff headers (e.g. a 429 with `retry-after`/`x-ratelimit-*`), not a blanket 502 (#73), so a coalesced client's backoff still works. |
 | `X-Request-ID` | Cradle's own request id (upstream's is relayed as `x-cradle-upstream-request-id`) |
 
+### 2.5 Request headers Cradle forwards upstream (#81, ADR-0009)
+
+Every client request header reaches the upstream **except** a fixed denylist: hop-by-hop
+(`connection`, `keep-alive`, `proxy-connection`, `te`, `trailer`, `transfer-encoding`,
+`upgrade`, and any header named in `Connection`), `host`, `content-length`, `content-type`,
+`accept-encoding`, `expect`, `proxy-authorization`, and `x-cradle-*`. `authorization` is
+the client's when `pass_through_client_auth: true` (default), else Cradle's
+`upstream.api_key_env` key. So `X-Session-Id`, `X-OpenWebUI-Chat-Id`/`-User-Id`,
+`traceparent`, etc. pass through on every upstream call (JSON miss, streams, L2 audit,
+`/v1/models`). They do **not** enter the cache key, and a cache hit or single-flight
+follower sends nothing upstream — an upstream that tracks sessions only sees misses.
+If a backend "lost the session id", check it was a miss (`X-Cradle-Cache: miss`).
+
 ---
 
 ## 3. Capacity & hard limits

@@ -27,7 +27,6 @@ from cradle.gateway.flight import (
 from cradle.gateway.models import ChatMessage, ChatRequest
 from cradle.gateway.probe import candidate_entry, probe_response
 from cradle.gateway.responses import (
-    _client_auth,
     _effective_ttl,
     _headers,
     _include_usage,
@@ -415,7 +414,7 @@ async def _miss_json(runtime, req, ctx, vec, compressed, payload, target) -> JSO
         t0 = time.perf_counter()
         try:
             completion = await chat(
-                runtime.http, target, payload, authorization=_client_auth(ctx)
+                runtime.http, target, payload, client_headers=ctx.headers
             )
         except UpstreamError as exc:
             # Remember it so the flight finally can hand followers the leader's REAL

@@ -67,10 +67,6 @@ def _include_usage(req: ChatRequest) -> bool:
     return bool(opts.get("include_usage"))
 
 
-def _client_auth(ctx: RequestContext) -> str | None:
-    return ctx.headers.get("authorization") or None
-
-
 def _upstream_error_response(
     runtime: Runtime, ctx: RequestContext, exc: UpstreamError
 ) -> JSONResponse:

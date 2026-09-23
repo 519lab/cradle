@@ -142,7 +142,7 @@ flowchart TB
 
 ### 2. Request pipeline (sequence of functions, not a ProxyService)
 
-`cradle/gateway/pipeline.py` is a **sequencer** — `handle_chat`, the L1/L2/miss dispatch, `_replay`, and the JSON miss path — not a god module. Each step lives in its own module: the streaming miss paths (bypass tee, #43 passthrough-cache, wrap) are in `cradle/gateway/stream.py`, and the response/observability leaf helpers (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`, `_client_auth`) — shared by the JSON and streaming paths — are in `cradle/gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Every module stays ≤ 600 lines.
+`cradle/gateway/pipeline.py` is a **sequencer** — `handle_chat`, the L1/L2/miss dispatch, `_replay`, and the JSON miss path — not a god module. Each step lives in its own module: the streaming miss paths (bypass tee, #43 passthrough-cache, wrap) are in `cradle/gateway/stream.py`, and the response/observability leaf helpers (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`) — shared by the JSON and streaming paths — are in `cradle/gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Every module stays ≤ 600 lines.
 
 Non-stream miss: compress → upstream JSON → wrap merge → writeback → respond.
 
@@ -601,6 +601,8 @@ bodies pass through verbatim (real message/type/code), with `retry-after` /
 ### Auth
 
 **Default (intercept):** `auth.keys: []`. Cradle does not issue keys. Clients keep their provider `Authorization`; it is forwarded upstream (`pass_through_client_auth: true`). Cache tenant/user is `sha256(bearer)` (or `anon` if the header is missing). No `X-User-Id`. The request body `user` field is **not** hashed.
+
+**Request headers (#81):** every client request header is forwarded upstream by default — a **denylist**, not an allowlist, so Cradle never impedes an application's own headers (session/chat ids such as `X-Session-Id` / `X-OpenWebUI-Chat-Id`, tracing, vendor routing). Stripped: hop-by-hop headers (RFC 9110 §7.6.1 plus any named in `Connection`), `host`, `content-length`, `content-type` (Cradle re-serializes the body as JSON), `accept-encoding` (httpx advertises only what it can decode), `expect`, `proxy-authorization`, and Cradle's own `x-cradle-*` control headers. `authorization` follows `pass_through_client_auth` as above, so a Cradle key in keyed mode never leaks. Headers are transport metadata: they are **not** part of the cache key, and on a cache hit or for a single-flight follower they never reach the upstream (`upstream/openai.py:forward_request_headers`, ADR-0009).
 
 **Optional allowlist:** if `auth.keys` is non-empty, unknown Bearers 401 (constant-time compare). Unset `token_env` for a listed key → refuse to start.
 
