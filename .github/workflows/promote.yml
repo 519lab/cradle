@@ -1,0 +1,29 @@
+name: promote
+
+# Opens or refreshes the single develop → main promotion pull request after ci passes on a develop push.
+# The logic lives in ggrace519/.github; see its README.
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: promote-develop-to-main
+  cancel-in-progress: true
+
+jobs:
+  promote:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    uses: ggrace519/.github/.github/workflows/promote.yml@v1
+    with:
+      ref: ${{ github.event.workflow_run.head_sha }}

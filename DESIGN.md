@@ -51,8 +51,8 @@ The PRD asks for a thin, CPU/edge-deployable middleware: SHA-256 L1, local-vecto
 | --- | --- |
 | G1 | OpenAI-compatible `POST /v1/chat/completions` (stream and non-stream) and `GET /v1/models`. Unknown generation-affecting fields are **forwarded**, not dropped. |
 | G2 | L1 exact match: SHA-256 of the canonical hash input (closed allowlist below), **p99 < 2 ms** for production `l1.get` (disk read + JSON decode + `CacheRecord.model_validate`). Excludes HTTP and canonicalize. |
-| G3 | L2 semantic match: FastEmbed BGE-small 384-d + in-process Qdrant, cosine **≥ 0.90** default (config allowed **0.88–0.93** per PRD band; **never default or clamp below 0.85**), **p99 < 25 ms including embed** on warm model, 256–512 token prompts, **single in-flight embed**. Queue delay from a busy embed pool is **out of budget** (`stage="embed"` histogram). |
-| G4 | On miss: rule-based **guards + fluff + whitespace** on `role=="user"` messages; **≥ 40% token savings** on the golden fixture suite under the **fixture policy** below. |
+| G3 | L2 semantic match: FastEmbed BGE-small 384-d + in-process Qdrant, cosine **≥ 0.90** default (config allowed **0.88–0.93** per PRD band; **never default or clamp below 0.85**), **p99 < 25 ms including embed** on warm model, 256–512 token prompts, **single in-flight embed**. Queue delay from a busy embed pool is **out of budget** (`stage="embed"` histogram). This budget covers the **cosine + embed** path; the precision guard + cross-encoder rerank added for #5 (Decisions 21–22) add latency on hits and meet 25 ms **only on the GPU rerank path**. |
+| G4 | On miss: rule-based **guards + fluff + whitespace** on `role=="user"` messages, **gated by `compress.min_savings_ratio`** (default 0.02 — below-floor requests forwarded uncompressed, #52); **≥ 40% token savings** on the golden fixture suite under the **fixture policy** below (verbose rows clear the floor, so the gate does not lower the aggregate). |
 | G5 | Reconstruct as a **prefix/suffix envelope** (brand + format-instruction lines). No second LLM. **Partially satisfies PRD FR-3.1** (layout/brand merge only). |
 | G6 | Writeback original-prompt embedding + **reconstructed** response to L1 and L2. TTL **86400 s**. Invalidate on `system_prompt_version` or `pipeline_version` change. |
 | G7 | Tenant-scoped keys (`tenant_id` **and** `user_id`). Semantic hits cannot cross users. |
@@ -89,14 +89,14 @@ Locked. Not a menu.
 | 2 | L1 store | **`diskcache.Cache`** (SQLite+mmap, process-embedded). No Redis. No RocksDB. | Process-safe, native `expire=`, tags. Sub-ms raw GET on SSD; production `get` includes JSON+validate and must still meet <2 ms p99. Redis is a daemon; RocksDB (`rocksdict`) is a native dep with no win at this QPS. |
 | 3 | L2 store | **Qdrant local** `QdrantClient(path=...)`. Tests: `:memory:`. | Same API as server later. Payload filters for tenancy + sampling. Official local-mode warning at **20k points** — operational contract, not trivia. |
 | 4 | Embeddings | **FastEmbed `BAAI/bge-small-en-v1.5`**, 384-d, CPU ONNX, **no prefix**. | 67 MB, 10–20 ms CPU. Persistent `cache_dir`; library default is `/tmp/fastembed_cache`. |
-| 5 | Compression v1 | **Guards + fluff regex + whitespace on user messages only.** `structure.to_dense` behind `features.structure` default **off**. | Honest 40% on a documented verbose-prompt set. Dense-JSON rewrite without a reconstruct story would immortalize compressed answers. |
+| 5 | Compression v1 | **Guards + fluff regex + whitespace on user messages only**, gated by benefit: a request whose strip saves < `compress.min_savings_ratio` (default 0.02) is forwarded **uncompressed** (#52), so terse turns pay no cost and G4's ≥40% still holds on the verbose fixture set (they clear the floor easily). `structure.to_dense` behind `features.structure` default **off**. | Honest 40% on a documented verbose-prompt set. Rule-based stripping removes ~0 from terse real traffic while adding a reconstruction pass, so it should not run there. Dense-JSON rewrite without a reconstruct story would immortalize compressed answers. |
 | 6 | Local 1B runtime | **`llama-cpp-python` in-process**, extra `cradle[local-1b]`, default **off**. | No Ollama. Extra not in default `uv sync`. |
 | 7 | Wire protocol | **OpenAI Chat Completions** `POST /v1/chat/completions` + SSE `text/event-stream` + `GET /v1/models`. | De-facto client contract. `ChatRequest extra="allow"`. |
-| 8 | Auth | **One proxy Bearer key ⇒ one `{tenant_id, user_id}`**. Upstream key from env. Pass-through **off**. | No shared-tenant key. No `X-User-Id`. Client `user` does not override. |
+| 8 | Auth | **Intercept by default.** Empty `auth.keys`: accept any/no Bearer, **forward `Authorization` upstream**, isolate L1/L2 by SHA-256 of that token (or `anon`). Optional `auth.keys` is an allowlist. | Drop-in in front of an existing OpenAI-compatible provider. No Cradle-issued key. |
 | 9 | Reconstruction v1 | **Prefix/suffix wrap.** No second LLM. No KV→essay expansion. | Partial FR-3.1. Stream-miss **tees** content; wrap is envelope around already-sent tokens, not a post-hoc rewrite. |
 | 10 | L1 canonicalization | **NFKC + selective whitespace + sorted JSON.** Closed generation-affecting allowlist **plus** sorted dump of remaining extras. | Includes `tool_choice`, `n`, `stop`, `seed`, `response_format`, penalties, `logit_bias`, `max_completion_tokens`. `None`/`[]`/`{}` canonicalized. |
-| 11 | Process model | **uvicorn `--workers 1`**. | Qdrant local is not a multi-writer. Startup **warn** if workers>1. |
-| 12 | Streaming cache | **Required in v1.** Hits: `synthesize_sse`. Misses: **wrap-mode tee** (prefix, tee `delta.content`, suffix, then finish). | Most clients send `stream: true`. Do not buffer the whole generation before TTFB. |
+| 11 | Process model | **uvicorn `--workers 1`**. | Qdrant local is not a multi-writer. Startup **refuses** if `WEB_CONCURRENCY` / `UVICORN_WORKERS` is set to anything other than `1`. |
+| 12 | Streaming cache | **Required in v1.** Hits: `synthesize_sse`. Cacheable misses: wrap-mode tee. `stream+tools` (#43): `_passthrough_cache_stream` — verbatim tee to the client + post-stream cache of no-tool-call responses (gated by `cache.cache_tool_streams`). **Bypass** (`n!=1`, `stream+logprobs`, images): **raw SSE byte passthrough**. Connect failure before body: JSON OpenAI error, not SSE. | Most clients send `stream: true` with tools; bypass must remain a pass-through gateway. |
 | 13 | L2 eligibility | **Off when tools non-empty (`[]` counts as empty) or `len(messages) > l2.max_messages` (default 2).** | LiteLLM: semantic cache on agentic/multi-turn replays stale tool calls. **L1 still applies to non-stream tool calls.** `stream=true` **and** tools → **uncacheable** (pass-through; no L1/L2). |
 | 14 | Cosine threshold | **Default 0.90.** Config range intended **0.88–0.93**. Clamp **min 0.85**. | PRD: <0.85 → false hits. Optional `@pytest.mark.embed` pair set validates 0.90 against real BGE. |
 | 15 | Config format | **YAML file + `CRADLE_*` env overlay** via a custom pydantic-settings source. | YAML is not native; PR 1 implements the source. Secrets only in env. |
@@ -104,7 +104,10 @@ Locked. Not a menu.
 | 17 | Thread pools | **Dedicated `embed_pool(max_workers=1)` via `loop.run_in_executor`.** L1/L2 KV on the **default** executor. Never `asyncio.to_thread` for ONNX. | `to_thread` uses the default pool; ONNX would stall L1 p99. |
 | 18 | `pipeline_version` | **Top-level `settings.pipeline_version` only.** | One path. Hash, L1 tag, L2 payload, `X-Cradle-Pipeline` all read this. |
 | 19 | Identity / license | **Local git only. MIT. No GitHub remote until Greg says so. No PyPI.** | `main` + `develop` initialized locally. Do not `git remote add` / `gh repo create` / trusted-publishing. |
-| 20 | Default upstream | **`http://127.0.0.1:8080/v1`**. Override `CRADLE_UPSTREAM_BASE_URL`. | Conventional local llama.cpp / vLLM OpenAI-compat bind. Not `api.openai.com`. Cradle itself listens on **8000** so the two do not collide. |
+| 20 | Default upstream | **`http://127.0.0.1:8080/v1`**. Override `CRADLE_UPSTREAM_BASE_URL`. Optional `upstreams` + `routes` (`fnmatch` on `model`). | One fallback plus named OpenAI-compatible backends (OpenAI, xAI, LiteLLM, llama.cpp). Anthropic `/v1/messages` is not v1. |
+| 21 | L2 precision (guard + rerank) | **Cosine recall is not precision.** Two stages gate an L2 hit before serving (#5): a cheap numbers/negation guard, then a `BAAI/bge-reranker-base` cross-encoder (`features.l2_rerank`, default **on**), both **fail forward to a real miss**; rerank **fails open** on model error. Reject is observable (`X-Cradle-Guard`, `X-Cradle-Rerank`). | A bi-encoder scores "capital of France/Germany" ≥ 0.90 and served the wrong cached answer. The guard catches number/negation swaps the reranker is blind to; the reranker catches entity swaps the guard is blind to. **Residual gap:** antonym swaps (closest/farthest) and negation edges score in the paraphrase range — no cosine or rerank threshold separates them; a cross-encoder is not an NLI model. |
+| 22 | Rerank latency budget + GPU deploy | **On CPU the reranker breaks the G3 25 ms L2 p99 budget** (~15–40 ms/hit for bge-reranker-base). `l2.rerank_device: cuda` restores it (~2–5 ms) but is a **separate image**, not just a config flag (#31): `onnxruntime-gpu` 1.30 needs CUDA 13.0 + cuDNN 9.x libs (per the onnxruntime CUDA-EP docs; 1.27+ PyPI wheels ship CUDA 13) that `python:3.12-slim` lacks, and it REPLACES the CPU `onnxruntime` (they conflict). So the GPU path is `docker/Dockerfile.gpu` (`nvidia/cuda:13.0.1-cudnn-runtime` base, `uv sync --extra rerank-gpu --no-install-package onnxruntime`) + `docker-compose-gpu.yml` (a standalone template that grants the GPU via `gpus: all` and sets `rerank_device=cuda`). `cuda` on the CPU image fails fast at startup with an actionable error (`rerank.py` checks `CUDAExecutionProvider` presence) instead of the raw fastembed `ValueError`. Accepted: correctness over the CPU latency target; the budget in **G3 applies to the cosine+embed path**, and is met with rerank on **only on a GPU host**. | The 25 ms figure predates the FP fix. Serving a wrong answer fast is worse than a correct answer in 40 ms — still ~200× under a 5–10 s upstream miss. CPU default keeps the thin deploy; GPU is the opt-in path back under budget. A config option with no runnable deploy path (the pre-#31 state) is worse than no option. |
+| 23 | Verified L2 (audit sampling) | **Off the critical path, opt-in** (`l2.audit_rate`, default 0). A sampled served L2 hit is re-asked upstream in a background task; the fresh answer is judged against the served one by the loaded cross-encoder (`audit_judge: auto`, `audit_rerank_threshold` 4.0 — measured: same answers ≥ 7.2, contradictory ≤ 2.1) with answer-embedding cosine as the weak fallback (`audit_embed_threshold` 0.90; cosine cannot separate contradictions). Raw score and judge are always logged. Verdicts feed `cradle_l2_audit_total{verdict}`, `{data_dir}/audits.jsonl`, and a per-entry **monotone floor** (`CacheRecord.audit_floor`: judged wrong at similarity `s` ⇒ refuse matches ≤ `s`). Disagree also writes the fresh answer under the query's key. | Static thresholds have no production measurement of wrong hits (vCache, arXiv 2502.03771, learns per-entry thresholds by exploring; Krites, arXiv 2602.13165, verifies asynchronously). The floor is the non-parametric, cold-start-free cousin of vCache's sigmoid fit. Cost is bounded by `audit_rate` and uses the client's forwarded credentials after its response completed. The embedding judge is a seam, not the last word. |
 
 ---
 
@@ -139,11 +142,11 @@ flowchart TB
 
 ### 2. Request pipeline (sequence of functions, not a ProxyService)
 
-`cradle/gateway/pipeline.py` is a **short sequencer** (<250 lines). Each step lives in its own module.
+`cradle/gateway/pipeline.py` is a **sequencer** — `handle_chat`, the L1/L2/miss dispatch, `_replay`, and the JSON miss path — not a god module. Each step lives in its own module: the streaming miss paths (bypass tee, #43 passthrough-cache, wrap) are in `cradle/gateway/stream.py`, and the response/observability leaf helpers (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`) — shared by the JSON and streaming paths — are in `cradle/gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Every module stays ≤ 600 lines.
 
 Non-stream miss: compress → upstream JSON → wrap merge → writeback → respond.
 
-Stream miss (wrap-mode v1 — this is the contract). Generate a **local** `id` (`chatcmpl-{uuid4}`) and `created` (unix seconds) and use them on **every** outbound frame. Do **not** mix upstream ids.
+Stream miss (wrap-mode v1 — this is the contract). Generate a **local** `id` (`chatcmpl-{uuid4}`) and `created` (unix seconds) and use them on **every** outbound frame. Do **not** mix upstream ids. **Only `id`/`created` are synthesized** — other top-level upstream fields (`usage`, `system_fingerprint`, `service_tier`) are **forwarded**, not dropped and not faked (goal G4: don't drop upstream fields). Cradle always requests `stream_options.include_usage` upstream on the wrap path so the cached record holds real usage, but only re-emits the usage chunk to the client when the client itself asked for it.
 
 ```mermaid
 sequenceDiagram
@@ -364,7 +367,9 @@ cradle/
     gateway/
       __init__.py
       routes.py
-      pipeline.py
+      pipeline.py                   # sequencer: handle_chat, L1/L2/miss dispatch, _replay, JSON miss
+      stream.py                     # streaming miss paths: bypass tee, #43 passthrough-cache, wrap
+      responses.py                  # response/observe leaf helpers (shared by JSON + stream)
       context.py                    # RequestContext, Principal
       sse.py
       writeback.py
@@ -424,8 +429,10 @@ cradle/
       test_roundtrip_oracle.py
     fake_upstream.py
   docker/Dockerfile
-  compose.yml
-  compose.ci.yml
+  docker/Dockerfile.gpu
+  docker-compose-cpu.yml
+  docker-compose-gpu.yml
+  docker-compose-ci.yml
 ```
 
 Module cap: **≤ 600 lines**. `pipeline.py` stays a sequencer.
@@ -455,7 +462,7 @@ Cache(
    - L1/L2 sync calls: `loop.run_in_executor(None, ...)` (default pool).
 6. If `features.l2`: `FastEmbedEmbedder(cache_dir=data_dir / "models/fastembed", threads=settings.l2.onnx_threads, providers=["CPUExecutionProvider"], lazy_load=False)`. Warmup `embed("ok")`. If `len(vec) != settings.l2.dim`: **startup error**. Set `os.environ["FASTEMBED_CACHE_PATH"]` to that cache_dir.
 7. If `features.local_1b` and extra missing: **startup error**. No silent fallback.
-8. If `features.l2` and workers>1 (env `WEB_CONCURRENCY` / uvicorn workers): log **warning**.
+8. If `features.l2` and workers>1 (env `WEB_CONCURRENCY` / `UVICORN_WORKERS`): **startup error**.
 9. Background purge every `cache.purge_interval_s` (default 300): `l1.expire()`, L2 delete `expires_at < now`, set `cradle_l2_points`. If count > 20_000: log **warning** (official local-mode threshold).
 10. Shutdown: pool.shutdown, diskcache.close, qdrant.close.
 
@@ -485,8 +492,10 @@ def is_cacheable(
         return False
     if has_non_text_parts(req.messages):      # image_url etc.
         return False
-    if req.stream and canonical.has_tools:
-        return False                          # stream+tools: pass-through, no L1/L2
+    if req.stream and req.logprobs:
+        return False                          # cached logprobs wrong on replay
+    if req.stream and canonical.has_tools and not settings.cache.cache_tool_streams:
+        return False                          # #43: stream+tools cacheable unless flag off
     return True
 
 def l2_eligible(
@@ -507,7 +516,7 @@ def l2_eligible(
 
 `has_tools` is false when `tools` is `None` or `[]`.
 
-**stream+tools:** uncacheable. Tests must **not** expect HIT-L1 for `tools` + `stream: true`. Non-stream tool calls **are** L1-cacheable (hash includes tools + tool_choice).
+**stream+tools (#43, ADR-0006):** cacheable when `cache.cache_tool_streams` is on (default) — routed to `_passthrough_cache_stream`, which tees the response to the client **verbatim** (a tool call relays intact) while accumulating a copy, and caches **only** a no-tool-call response, in the same `merge()`-reconstructed representation the JSON path stores (JSON and stream share a key — `stream` is excluded from `hash_input`). Fail-closed: caches only on a parsed terminal `finish_reason in {stop,eos}`, no error, no tool call, no delta key outside `{role,content,tool_calls}`, no unparseable framing, client still connected. Tool requests are **L1-only** (`l2_eligible` excludes `has_tools`). With the flag off, or for `stream+logprobs`, the request BYPASSes. Non-stream tool calls **are** L1-cacheable (hash includes tools + tool_choice).
 
 ---
 
@@ -520,7 +529,7 @@ def l2_eligible(
 | GET | `/healthz` | no | `{"status":"ok"}` 200. |
 | GET | `/readyz` | no | 200 if ready components up; 503 otherwise. |
 | GET | `/metrics` | **yes** if `metrics.require_auth: true` (default **true**) | Prometheus text. Same Bearer as chat. Set `require_auth: false` only with loopback bind. |
-| GET | `/v1/models` | yes | Config list, or upstream passthrough. |
+| GET | `/v1/models` | yes | Upstream passthrough when single-backend (no named routes) or `models_passthrough`; else the config list. Falls back to the config list on upstream error. |
 | POST | `/v1/chat/completions` | yes | Below. |
 
 ### `POST /v1/chat/completions`
@@ -561,7 +570,7 @@ class ChatRequest(BaseModel):
 
 `developer` role must **not** 422. Unknown top-level fields stay on the model (`model_extra`) and are forwarded upstream.
 
-**Upstream payload** = `req.model_dump(exclude_none=True)` after replacing `messages` with compressed messages (user fluff stripped; other roles identity). Extras included.
+**Upstream payload** = `req.model_dump(exclude_unset=True, exclude_none=True)` after replacing `messages` with compressed messages (user fluff stripped; other roles identity). Client-set extras included. `exclude_unset` keeps the pass-through honest — Cradle forwards only fields the client actually sent, so it never injects its own `ChatRequest` sampling defaults (`temperature`/`top_p`/penalties/`n`/`stream`) onto a backend with its own (llama.cpp/vLLM/Ollama); `exclude_none` keeps the result a strict subset of the old payload (an explicit optional `null` is not re-forwarded). The audit path (`run_audit`) uses the same dump. Cache identity is unaffected: `canonicalize` reads the defaulted attributes, so an omitted `temperature` and an explicit `1.0` still share a key (#26).
 
 Response: OpenAI `chat.completion` or SSE `chat.completion.chunk` ending with literal `data: [DONE]\n\n`.
 
@@ -573,34 +582,31 @@ X-Cradle-Cache: HIT-L1 | HIT-L2 | MISS | BYPASS
 X-Cradle-Pipeline: <pipeline_version>
 X-Cradle-Similarity: <float>          # L2 hits only
 X-Cradle-Inbound-Tokens: <int>
-X-Cradle-Upstream-Tokens: <int>
+X-Cradle-Upstream-Tokens: <int>       # omitted on a streaming MISS: the count is
+                                      # only known after the body streams, too late
+                                      # for a header — omit beats a false 0. Present
+                                      # on JSON responses and on streaming cache hits.
+X-Cradle-Upstream-Request-Id: <str>  # allowlisted upstream request id, renamed so it
+                                      # never clobbers X-Request-ID (error + bypass)
+Retry-After / X-RateLimit-*           # relayed from upstream on error + bypass
 Cache-Control: no-cache               # stream responses
 X-Accel-Buffering: no                 # stream responses
 ```
 
-Errors: `{"error":{"message","type","code"}}` with 401/413/502/504.
+Errors: `{"error":{"message","type","code"}}` with 401/413/502/504. Upstream error
+bodies pass through verbatim (real message/type/code), with `retry-after` /
+`x-ratelimit-*` relayed. Body-framing headers (`content-length`, `content-encoding`,
+`transfer-encoding`) are never forwarded — they describe Cradle's re-framed body.
 
 ### Auth
 
-**v1 mapping (only):** one proxy Bearer key ⇒ one `{tenant_id, user_id}`. That is the entire tenancy model. Do not share a key across users. No `X-User-Id` (or any client-supplied user header). The request body `user` field is **not** hashed and **does not** override `user_id`.
+**Default (intercept):** `auth.keys: []`. Cradle does not issue keys. Clients keep their provider `Authorization`; it is forwarded upstream (`pass_through_client_auth: true`). Cache tenant/user is `sha256(bearer)` (or `anon` if the header is missing). No `X-User-Id`. The request body `user` field is **not** hashed.
 
-```
-Authorization: Bearer <proxy-key>
-```
+**Request headers (#81):** every client request header is forwarded upstream by default — a **denylist**, not an allowlist, so Cradle never impedes an application's own headers (session/chat ids such as `X-Session-Id` / `X-OpenWebUI-Chat-Id`, tracing, vendor routing). Stripped: hop-by-hop headers (RFC 9110 §7.6.1 plus any named in `Connection`), `host`, `content-length`, `content-type` (Cradle re-serializes the body as JSON), body digests (`content-md5`/`digest`/`content-digest`/`repr-digest`), `accept-encoding` (httpx advertises only what it can decode), `expect`, `proxy-authorization`, and Cradle's own `x-cradle-*` control headers. `authorization` follows `pass_through_client_auth` as above, so a Cradle key in keyed mode never leaks; the forwarded one is the first occurrence, the one tenancy authenticated. Headers travel as raw ASGI bytes pairs (repeats kept, values byte-exact). Headers are transport metadata: they are **not** part of the cache key, and on a cache hit or for a single-flight follower they never reach the upstream (`upstream/openai.py:forward_request_headers`, ADR-0009).
 
-`hmac.compare_digest` against configured keys. Dummy compare on missing header still 401.
+**Optional allowlist:** if `auth.keys` is non-empty, unknown Bearers 401 (constant-time compare). Unset `token_env` for a listed key → refuse to start.
 
-```yaml
-auth:
-  keys:
-    - token_env: CRADLE_API_KEY
-      tenant_id: default
-      user_id: default
-```
-
-A second person gets a **second** key entry with its own `user_id`. Unset `token_env` → refuse to start unless `auth.allow_insecure_loopback: true` **and** bind is loopback.
-
-Upstream: Bearer from `CRADLE_UPSTREAM_API_KEY`. `upstream.pass_through_client_auth: false`.
+Upstream fallback when pass-through is off or the client sent no Bearer: `CRADLE_UPSTREAM_API_KEY`.
 
 ---
 
@@ -608,10 +614,10 @@ Upstream: Bearer from `CRADLE_UPSTREAM_API_KEY`. `upstream.pass_through_client_a
 
 ### Hash input schema (L1) — contract
 
-Closed allowlist of generation-affecting fields, plus a sorted dump of remaining extras. `stream` is **not** hashed (one stored JSON serves JSON and synthesized SSE). `user` (client hint) is **not** hashed. `stream_options` is **not** hashed (replay honors the **current** request’s `include_usage`).
+Closed allowlist of generation-affecting fields, plus a sorted dump of remaining extras. `stream` is **not** hashed (one stored JSON serves JSON and synthesized SSE). `user` (client hint) is **not** hashed. `stream_options` is **not** hashed (replay honors the **current** request’s `include_usage`). Non-semantic extras (`normalize._NON_SEMANTIC_FIELDS`: `prompt_cache_key`, `prompt_cache_retention`, `safety_identifier`, `session_id`, `chat_id`, `metadata`, `store`) are forwarded upstream but **not** hashed, so a per-session/chat id never splits the cache (#82); every other extra (`top_k`, `min_p`, …) is.
 
 ```python
-HASH_SCHEMA_VERSION = 1
+HASH_SCHEMA_VERSION = 3  # 2: backend namespace + routing hints; 3: session fields (#82)
 
 EMPTY_AS_NONE = ("tools", "logit_bias")          # None and []/{} → None
 EMPTY_DICT_AS_NONE = ("tool_choice",)
@@ -666,7 +672,7 @@ def sampling_fingerprint(c: CanonicalRequest) -> str:
     return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 ```
 
-Tests (`tests/test_normalize.py`): `response_format`, `seed`, `tool_choice` must not collide; `tools: []` vs `tools: null` **must** collide (same key); unknown extra `foo=1` vs `foo=2` must not collide; extra fields must appear on the fake upstream; two non-stream tool requests that differ only in `messages[].tool_calls` must not share an L1 key; `stream+tools` remains BYPASS. `tests/test_l2.py`: `logprobs` / `logit_bias` / one extras field mismatch must not L2-hit (fingerprint).
+Tests (`tests/test_normalize.py`): `response_format`, `seed`, `tool_choice` must not collide; `tools: []` vs `tools: null` **must** collide (same key); unknown extra `foo=1` vs `foo=2` must not collide; extra fields must appear on the fake upstream; two non-stream tool requests that differ only in `messages[].tool_calls` must not share an L1 key; `stream+tools` is cacheable (#43) — MISS then HIT-L1 for a no-tool-call response, MISS (never cached) for a tool-call response; BYPASS only with `cache_tool_streams` off or `stream+logprobs`. `tests/test_l2.py`: `logprobs` / `logit_bias` / one extras field mismatch must not L2-hit (fingerprint).
 
 ### Canonicalization rules (`cradle/normalize.py`)
 
@@ -677,10 +683,10 @@ Tests (`tests/test_normalize.py`): `response_format`, `seed`, `tool_choice` must
 5. **JSON key sort:** dict `content`, `tools`, `tool_choice`, `tool_calls`, `response_format`, `logit_bias`, request `extras`, and message `extras` dumped with `sort_keys=True` then `json.loads`.
 6. **Floats:** `temperature`, `top_p`, `presence_penalty`, `frequency_penalty` rounded to 6 decimal places.
 7. **`system_prompt_version`:** `sha256(NFKC(concat of system **and developer** message contents with "\n\n")).hexdigest()[:16]`. None → `"none"`.
-8. **`pipeline_version`:** `settings.pipeline_version` (top-level, default `"v1"`). Bump when compression or wrap behavior changes.
+8. **`pipeline_version`:** `settings.pipeline_version` (top-level, default `"v2"`). Bump when compression or wrap behavior changes.
 9. **Do not** lowercase. Do not include the Bearer token.
 
-**Embed text (L2):** canonical messages as `{role}: {content}\n`, excluding tenant/user (filters, not vector).
+**Embed text (L2):** the **user/assistant** canonical messages as `{role}: {content}\n`. **System and developer turns are excluded** (#40): they are already in the cache identity via `system_prompt_version` and the L1 key, and a large fixed system prompt (open-webui/RAG/agent frames) otherwise dominates the embedding and collides unrelated user questions at high cosine — a false L2 hit that serves the wrong answer. `embed_text` therefore means *matchable content*, not *the prompt*; the guard, rerank, `audits.jsonl` rows, and the `logging.content` `prompt=` field all read it under that meaning. Tenant/user are filters, not vector. A request with no user/assistant content (system-only) has empty `embed_text` and is **L2-ineligible**.
 
 ### Cache record schema
 
@@ -740,7 +746,7 @@ L2 point: `id=str(uuid.uuid5(uuid.NAMESPACE_URL, key))`, vector 384 floats, payl
 | Event | Action |
 | --- | --- |
 | TTL 86400 | L1 native expire; L2 `expires_at >= now` filter + purge |
-| `pipeline_version` change | Hash miss. Startup `evict_tag(old)` if `cache.evict_old_pipeline` (needs `tag_index=True`). L2 filter by new version. |
+| `pipeline_version` change | Hash miss (new version is folded into the L1 key and the L2 filter). Old-version entries are not served and age out on TTL — there is no startup eviction (the tag is written for `l1.evict_tag`, but nothing persists the previous version to evict; see #27). A bump is therefore reversible within the entries' TTL. |
 | System/developer prompt change | `system_prompt_version` changes → L1 miss, L2 filter miss. |
 | Manual | Delete `{data_dir}/l1` and `{data_dir}/l2`. No public DELETE in v1. |
 
@@ -987,7 +993,7 @@ Tests (`tests/test_sse.py`): literal `data: [DONE]\n\n` without quotes; **no** `
 - 4xx/5xx: OpenAI error JSON; **no writeback**.
 - Fake upstream: `tests/fake_upstream.py` ASGI + httpx `ASGITransport`. **No live LLM in any PR.**
 
-`GET /v1/models`: passthrough if configured, else `settings.upstream.models`.
+`GET /v1/models`: passthrough when `models_passthrough` is set OR the deploy is single-backend (no named `upstreams`/`routes`), so a fallback-only deploy reflects the real upstream model; else `settings.upstream.models`. On upstream error, falls back to `settings.upstream.models` rather than erroring (clients poll it).
 
 Forward the full dump including extras.
 
@@ -1074,7 +1080,7 @@ Cache `Encoding` objects per name. Golden-suite ≥40% **must** use this functio
 server:
   host: 127.0.0.1
   port: 8000                      # Cradle listen; upstream default is :8080
-  max_body_bytes: 1048576
+  max_body_bytes: 134217728       # 128 MiB (fits 1M-token + multimodal bodies)
 
 data_dir: ./data
 
@@ -1106,7 +1112,6 @@ features:
 cache:
   ttl_s: 86400
   max_temperature: 1.0
-  evict_old_pipeline: true
   purge_interval_s: 300
   l1_size_limit_bytes: 1000000000
 
@@ -1123,7 +1128,7 @@ l2:
 
 compress:
   structure_min_chars: 400
-  min_tokens: 16
+  min_savings_ratio: 0.02
 
 reconstruct:
   mode: wrap
@@ -1193,7 +1198,7 @@ Dev: `pytest`, `pytest-cov`, `pytest-asyncio`, `ruff`, `respx`. Optional extra `
 | Timing auth oracle | Medium | `hmac.compare_digest`; dummy work on missing header. |
 | Prompt at rest | Medium | `data_dir` mode 0700. No encryption-at-rest (edge trust boundary). |
 | SSRF | Medium | `upstream.base_url` config-only. |
-| Over-large body | Low | 1 MiB. |
+| Over-large body | Low | `max_body_bytes` **128 MiB** default (#34). Sized for real LLM traffic: a 1M-token text prompt is ~4-6 MB, but inline base64 images dominate at ~30-45 MB for a handful of photos — 128 MiB clears both with margin while still rejecting gigabyte-scale abuse. A lower cap would 413 requests the upstream would accept. Enforced by a `Content-Length` pre-check (reject before buffering) plus a post-read backstop for chunked/lying headers. **Residual:** a chunked body with no `Content-Length` is still fully buffered before the backstop fires — bound it with a reverse proxy (`client_max_body_size`) in front. |
 | Metrics scrape | Medium | `metrics.require_auth: true` default. Compose publishing `0.0.0.0:8000` still requires Bearer. Loopback-only scrapers may set `require_auth: false`. |
 | False semantic hit | High | 0.90 default, 0.85 clamp, sampling filters, L2 off for tools/multi-turn, embed pair eval. |
 
@@ -1230,7 +1235,10 @@ cradle_ready{component="l1|l2|embedder"}
 cradle_l2_points                                  # Gauge; warn log if > 20000
 ```
 
-No prompt text in logs.
+No prompt text in logs **by default**. Prompt/response text in the per-request
+log line is an explicit opt-in via `logging.content` (`none` → `prompts` →
+`prompts_and_completions`), off by default — the request-path analogue of
+`l2.audit_log_text`. See ADR-0004 in `DECISIONS.md`.
 
 ---
 
@@ -1277,13 +1285,13 @@ Per-process from settings, not per-request headers.
 
 Default path: `uv run python -m cradle`.
 
-`compose.yml`: proxy only, `CRADLE_SERVER__HOST: 0.0.0.0`, `CRADLE_DATA_DIR: /data`, bind `8000:8000`. **`metrics.require_auth` stays true.** No redis/qdrant/postgres. Default upstream remains `http://127.0.0.1:8080/v1` (host-reachable llama.cpp/vLLM, not another compose service).
+Compose templates (`docker-compose-cpu.yml` default, `docker-compose-gpu.yml` for CUDA rerank; copy one to the gitignored `docker-compose.yml`): proxy only, `CRADLE_SERVER__HOST: 0.0.0.0`, `CRADLE_DATA_DIR: /data`, bind `8000:8000`. **`metrics.require_auth` stays true.** No redis/qdrant/postgres. Compose default upstream is `http://host.docker.internal:8080/v1` (`extra_hosts: host-gateway`) so a host-side OpenAI-compatible server is reachable; override with `CRADLE_UPSTREAM_BASE_URL`. FastEmbed weights live at `FASTEMBED_CACHE_PATH` (`/opt/cradle/models/fastembed` in the image), **not** under `/data`, so the data volume does not hide baked models. The **runtime config is bind-mounted, not baked** (`./config:/app/config:ro`): the image bakes only `cradle.yaml.example`, so a config edit is a `docker compose restart` (no rebuild) and no gitignored working-tree config is captured at build time (ADR-0003, #36). The `config/` dir is mounted, not the file, so a fresh clone without `config/cradle.yaml` runs on defaults rather than compose auto-creating an empty directory.
 
-**Dockerfile must not `VOLUME /data`.** `compose.ci.yml`: `tmpfs: ["/data"]`.
+**Dockerfile must not `VOLUME /data`.** Multi-stage `uv sync --frozen`. `docker-compose-ci.yml`: `tmpfs: ["/data"]`, `BAKE_EMBEDDINGS=0`, `CRADLE_FEATURES__L2=false`.
 
 Healthcheck: `GET /readyz`.
 
-README must state: Qdrant local is **not recommended above 20k points** (`QdrantLocal.LARGE_DATA_THRESHOLD`). The fix is Qdrant **server** (`l2.mode: server` later), not more local-mode tuning. v1 does not implement server mode. README also documents default upstream `http://127.0.0.1:8080/v1`, override `CRADLE_UPSTREAM_BASE_URL` (example: `https://api.openai.com/v1`), Cradle listen `127.0.0.1:8000`, MIT, local git only (no GitHub remote, no PyPI), and one key ⇒ one `user_id`.
+README must state: Qdrant local is **not recommended above 20k points** (`QdrantLocal.LARGE_DATA_THRESHOLD`). The fix is Qdrant **server** (`l2.mode: server` later), not more local-mode tuning. v1 does not implement server mode. README also documents Compose vs `uv run`, intercept auth (forward client Bearer), `CRADLE_UPSTREAM_BASE_URL` (example: `https://api.openai.com/v1`), Cradle listen `:8000`, MIT, GitHub `519lab/cradle`, no PyPI.
 
 ---
 
@@ -1311,7 +1319,7 @@ Flags off-safe. Rollback: flags off, or delete data dirs, or revert on `develop`
 | Qdrant local >20k points | **High** | Gauge `cradle_l2_points`; log warning at 20k; README: move to server later. ~0.23 unique L2 writes/s fills 20k in 24h TTL — a small team, not hyperscale. Do not pretend local mode scales past the library warning. |
 | L1 p99 > 2 ms (Pydantic validate, HDD, shared pool) | Medium | Timer is production `get_sync`; ONNX on `embed_pool`; JSON bytes; latency test; `CRADLE_SKIP_LATENCY` for noisy CI; optional later TTLCache front **out of v1**. |
 | Concurrent L2 p99 miss | Medium | Document single-in-flight-embed budget; histogram `stage="embed"`. |
-| L2 local multi-writer | Medium | workers=1; startup warn. |
+| L2 local multi-writer | Medium | workers=1; startup refuses `WEB_CONCURRENCY`/`UVICORN_WORKERS` ≠ 1. |
 | FastEmbed `/tmp` re-download | Medium | Always set `cache_dir`. |
 | Qdrant no TTL | Low | `expires_at` filter + purge. |
 | tiktoken ≠ vendor tokenizer | Low | Prefer upstream `usage.prompt_tokens`. |
@@ -1433,7 +1441,7 @@ All four product calls are **Resolved** (Greg, 2026-09-16). Do not reopen.
 ### PR 4: FastEmbed + Qdrant local L2
 - **Files/components affected:** `src/cradle/embeddings/base.py`, `src/cradle/embeddings/fastembed.py`, `src/cradle/embeddings/fake.py`, `src/cradle/cache/l2.py`, `src/cradle/gateway/pipeline.py`, `src/cradle/app.py`, `src/cradle/metrics/prometheus.py` (gauge stub ok), `tests/test_l2.py`, `tests/test_embeddings_fake.py`, `tests/eval/test_cache_replay.py`, `tests/eval/l2_pairs.jsonl`, `tests/eval/test_l2_pairs.py`, `config/cradle.yaml`, `.env.example`
 - **Dependencies:** PR 3
-- **Description:** Embedder protocol; FakeEmbedder in default CI; FastEmbed BGE-small with persistent `cache_dir`, `CPUExecutionProvider`, `embed_pool(max_workers=1)` via `run_in_executor` (not `to_thread`). Qdrant local / `:memory:`. `query_points` `must` filter `tenant_id`, `user_id`, `model`, `system_prompt_version`, `pipeline_version`, `sampling_fingerprint`, `expires_at >= now` (scalars only). Cosine 0.90, clamp 0.85, score in [0,1], `limit=1`. L2 skipped for tools or `len(canonical.messages) > max_messages`. Tests: `logprobs` / `logit_bias` / extras mismatch must not L2-hit. L2 hit promotes into L1. Embed timeout → miss. `/readyz` warmup. `cradle_l2_points` + warn at 20k. **Required** cross-tenant and cross-user tests. `@pytest.mark.embed` pair file not in default CI. Flag `features.l2`. `l2.mode: server` startup-errors.
+- **Description:** Embedder protocol; FakeEmbedder in default CI; FastEmbed BGE-small with persistent `cache_dir`, `CPUExecutionProvider`, `embed_pool(max_workers=1)` via `run_in_executor` (not `to_thread`). Qdrant local / `:memory:`. `query_points` `must` filter `tenant_id`, `user_id`, `model`, `system_prompt_version`, `pipeline_version`, `sampling_fingerprint`, `expires_at >= now` (scalars only). Cosine 0.90, clamp 0.85, score in [0,1], `limit=1`. L2 skipped for tools, `len(canonical.messages) > max_messages`, or empty `embed_text` (system-only request, #40). `embed_text` embeds user/assistant turns only (system/developer excluded — #40). Tests: `logprobs` / `logit_bias` / extras mismatch must not L2-hit. L2 hit promotes into L1. Embed timeout → miss. `/readyz` warmup. `cradle_l2_points` + warn at 20k. **Required** cross-tenant and cross-user tests. `@pytest.mark.embed` pair file not in default CI. Flag `features.l2`. `l2.mode: server` startup-errors.
 
 ### PR 5: rule-based compression engine
 - **Files/components affected:** `src/cradle/compress/guards.py`, `src/cradle/compress/rules.py`, `src/cradle/compress/structure.py`, `src/cradle/compress/engine.py`, `src/cradle/gateway/pipeline.py`, `tests/test_compress.py`, `tests/test_guards.py`, `tests/eval/golden_prompts.jsonl`, `tests/eval/test_token_savings.py`, `tests/eval/test_roundtrip_oracle.py`, `CHANGELOG.md`
