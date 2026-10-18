@@ -64,3 +64,7 @@ Modules stay ≤ 600 lines. No `ProxyService` god object. The gateway request pa
 Single-flight (`cache.singleflight`, default off, #57): concurrent identical cacheable misses coalesce onto one upstream call — the first is the leader (writes back), later identical arrivals are followers (marked `X-Cradle-Flight: follower`, `upstream_prompt_tokens=0`). Keyed on the L1 key + stream-ness; flight registry is `Runtime.flights`. See ADR-0008.
 
 Design contract: `DESIGN.md`. Product: `PRD.md`. Production operations: `RUNBOOK.md` (ADR-0002) — lock-step material: any change touching a config key, env var, metric name, health/readiness condition, capacity limit, or per-request header updates `RUNBOOK.md` in the same PR, and bumps its "Verified against" date when a command is re-checked against a running instance.
+
+## Promotion workflow
+
+`.github/workflows/promote.yml` opens and refreshes the develop → main promotion PR after ci passes on a develop push. It calls the shared `ggrace519/.github` workflow at `@v1`. An open promotion PR is not approval: merging it is still the maintainer's call, as a merge commit, never a squash.
