@@ -24,6 +24,6 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
-    uses: ggrace519/.github/.github/workflows/promote.yml@v1
+    uses: ggrace519/.github/.github/workflows/promote.yml@56da419a93d4eca7fe1771297dc734fbd9c39fb4 # v1.0.2
     with:
       ref: ${{ github.event.workflow_run.head_sha }}
