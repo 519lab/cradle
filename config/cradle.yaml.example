@@ -1,0 +1,140 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+  max_body_bytes: 134217728   # 128 MiB — fits 1M-token + multimodal (base64 image) bodies; lower for text-only
+
+data_dir: ./data
+
+pipeline_version: v3
+
+auth:
+  allow_insecure_loopback: false
+  keys: []
+
+# Fallback when no route matches (llama.cpp / LiteLLM / etc).
+upstream:
+  base_url: http://127.0.0.1:8080/v1
+  api_key_env: CRADLE_UPSTREAM_API_KEY
+  timeout_s: 120
+  pass_through_client_auth: true
+  models_passthrough: false
+  models: ["gpt-4o-mini"]
+
+# Named OpenAI-compatible backends. First matching route wins.
+# upstreams:
+#   openai:
+#     base_url: https://api.openai.com/v1
+#     models: ["gpt-4o", "gpt-4o-mini"]
+#   xai:
+#     base_url: https://api.x.ai/v1
+#     models: ["grok-4", "grok-3"]
+#   litellm:
+#     base_url: http://127.0.0.1:4000/v1
+# routes:
+#   - model: "gpt-*"
+#     to: openai
+#   - model: "o1-*"
+#     to: openai
+#   - model: "o3-*"
+#     to: openai
+#   - model: "grok-*"
+#     to: xai
+#   - model: "*"
+#     to: default
+
+features:
+  cache: true
+  compression: true
+  structure: false
+  l2: true
+  l2_rerank: true   # cross-encoder rerank of L2 hits; closes entity-swap FPs
+  reconstruction: true
+  local_1b: false
+
+cache:
+  ttl_s: 86400
+  max_temperature: 1.0
+  purge_interval_s: 300
+  l1_size_limit_bytes: 1000000000
+  # Volatility guard: prompts asking about time-sensitive things ("latest
+  # version", "current price", "today", weather, news) are stored with
+  # volatile_ttl_s instead of ttl_s. 0 = never store them. A client's own
+  # X-Cradle-Cache-TTL always wins. Reason is visible as X-Cradle-Volatile.
+  volatility_guard: true
+  volatile_ttl_s: 300
+  # Cache tool-enabled STREAMING requests (#43). Off = stream+tools bypasses the
+  # cache entirely (the wrap path can't carry a tool call). On (default) = tee the
+  # response to the client verbatim while accumulating a copy, and cache it only
+  # when it contains NO tool call. Non-streaming tool requests are cached either
+  # way. NOTE: the volatility guard is a regex over user text and does not inspect
+  # tool semantics, so a stateful tool with no time-word ("what's my balance") can
+  # serve a stale cached answer under this flag; set false to disable.
+  cache_tool_streams: true
+  singleflight: false        # coalesce concurrent identical misses onto one upstream call (#57); default OFF
+
+l2:
+  mode: local
+  collection: cradle_l2
+  cosine_threshold: 0.90
+  max_messages: 2
+  embed_timeout_s: 2.0
+  model: BAAI/bge-small-en-v1.5
+  dim: 384
+  onnx_threads: null
+  points_warn: 20000
+  # Cross-encoder rerank (features.l2_rerank). Threshold is a raw logit from
+  # rerank_model; on bge-reranker-base, entity swaps score < ~3.5 and genuine
+  # paraphrases > ~4.8 (role-framed input), so 4.0 rejects entity swaps while
+  # keeping real hits. rerank_device cpu (default, ~15-40ms/hit) or cuda
+  # (~2-5ms, needs cradle[rerank-gpu] + a CUDA host).
+  rerank_model: BAAI/bge-reranker-base
+  rerank_threshold: 4.0
+  rerank_timeout_s: 2.0
+  # Try the top-K nearest L2 candidates (best-first), serving the first that
+  # survives the guard + rerank. Raises hit rate without lowering the cosine
+  # floor. 1 = only the single nearest neighbor.
+  query_top_k: 5
+  rerank_device: cpu
+  rerank_device_ids: null
+  # Verified L2: sample this fraction of served L2 hits and, in the background,
+  # call upstream again and judge whether the fresh answer agrees with the
+  # served one. Measures the real false-hit rate (cradle_l2_audit_total),
+  # teaches each entry a floor below which it refuses to serve again,
+  # self-heals wrong hits, and logs labeled observations to
+  # {data_dir}/audits.jsonl. 0 = off. Audits spend real upstream calls, so
+  # 0.01-0.05 is the sensible range.
+  audit_rate: 0.0
+  # Judge: auto = the cross-encoder reranker when loaded (measured: same
+  # answers >= 7.2, contradictory <= 2.1 on bge-reranker-base), else answer
+  # cosine (weak: cannot separate contradictions; high threshold on purpose).
+  audit_judge: auto
+  audit_rerank_threshold: 4.0
+  audit_embed_threshold: 0.90
+  audit_log: true
+  audit_log_text: false   # true = include prompt text in the JSONL rows
+
+compress:
+  structure_min_chars: 400
+  min_savings_ratio: 0.02   # skip compression when fluff-stripping saves < this fraction (#52)
+
+reconstruct:
+  mode: wrap
+  tenants: {}
+
+metrics:
+  enabled: true
+  require_auth: true
+
+logging:
+  # Two independent axes. level = how much detail; content = how sensitive.
+  level: INFO      # INFO: one request line per request. DEBUG: also per-candidate
+                   # L2 guard/rerank/audit-floor rejection lines. (WARNING and up
+                   # keep only warnings + errors.)
+  # content controls whether prompt/response TEXT (PII) may appear in the logs.
+  #   none                     keys, hashes, cache decision, scores, timings only
+  #   prompts                  + the request prompt text
+  #   prompts_and_completions  + the response text
+  # Default none on purpose (the request-path analogue of l2.audit_log_text).
+  content: none
+  format: text     # text = human-readable key=value; json = one JSON object per line
+  max_text_chars: 2000   # truncate any logged prompt/response text to this many chars

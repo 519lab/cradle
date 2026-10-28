@@ -1,0 +1,43 @@
+# Cradle — CPU variant (default): cross-encoder rerank on CPU (~15-40 ms/hit).
+# For GPU rerank (~2-5 ms) use docker-compose-gpu.yml instead. Pick one.
+#
+# Usage: copy the one you want to docker-compose.yml (gitignored, the local
+# working copy), then run plain compose:
+#
+#   cp docker-compose-cpu.yml docker-compose.yml
+#   docker compose up --build
+services:
+  cradle:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        BAKE_EMBEDDINGS: "1"
+        HF_TOKEN: ${HF_TOKEN:-}
+    image: cradle:local
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CRADLE_SERVER__HOST: "0.0.0.0"
+      CRADLE_DATA_DIR: /data
+      CRADLE_CONFIG: /app/config/cradle.yaml
+      FASTEMBED_CACHE_PATH: /opt/cradle/models/fastembed
+      CRADLE_UPSTREAM_API_KEY: ${CRADLE_UPSTREAM_API_KEY:-}
+      CRADLE_UPSTREAM_BASE_URL: ${CRADLE_UPSTREAM_BASE_URL:-http://host.docker.internal:8080/v1}
+    volumes:
+      # Runtime config is bind-mounted, not baked into the image (#36): edit the
+      # host config/cradle.yaml and `docker compose restart cradle` — no rebuild.
+      # Mount the whole config/ dir (always present in a clone) rather than the
+      # file (absent in a fresh clone, which would make compose auto-create it as
+      # an empty directory). No file → Cradle runs on code defaults.
+      - ./config:/app/config:ro
+      - cradle-data:/data
+    restart: unless-stopped
+
+volumes:
+  cradle-data:
