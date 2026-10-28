@@ -79,6 +79,7 @@
 - The `cradle_l2_points` gauge is updated on each L2 write, not only every 300s by the purge loop, so a fresh instance no longer reports 0 L2 points while actively serving semantic hits. The purge loop still reconciles the exact count. (#4)
 
 ### Infrastructure
+- The promotion workflow now pins the shared `promote` workflow to a commit SHA (v1.0.2) instead of the moving `v1` tag, so upstream changes can't silently alter what runs in this repo's CI.
 
 - A `promote` workflow opens the single `develop` → `main` promotion pull request after ci passes on a develop push, and refreshes its commit and file summary on later develop pushes. It uses the shared `ggrace519/.github` workflow.
 - **`gateway/pipeline.py` split into three modules to restore the ≤600-line rule.** `pipeline.py` had grown to 766 lines — over the project's own module-size limit (asserted as fact in `CLAUDE.md`/`DESIGN.md`, and false). The streaming miss paths (bypass tee, the #43 tool-stream passthrough-cache, and the wrap path) moved to `gateway/stream.py`; the response/observability leaf helpers shared by the JSON and streaming paths (`_headers`, `_observe`, `_effective_ttl`, `_upstream_error_response`, `_include_usage`, `_client_auth`) moved to `gateway/responses.py`, so both importers depend on a leaf and the import graph stays acyclic. Pure code motion — every moved function is byte-identical, the full suite passes unchanged (251), and the three modules are now 375 / 356 / 116 lines. No behavior, config, header, or metric change.
